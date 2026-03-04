@@ -1,0 +1,276 @@
+---
+name: table-of-authorities
+description: Use when extracting citations from a legal brief to build a Table of Authorities - scans document pages, identifies and categorizes all legal citations (cases, statutes, constitutional provisions, legislative materials, secondary sources), resolves short forms (Id., supra, reporter-only cites) back to full citations, and produces a categorized TOA with page references in both structured data and formatted legal output
+---
+
+# Table of Authorities Extraction
+
+## Overview
+
+Extract every legal citation from a brief, resolve short forms to their full citations, categorize each authority, and produce a Table of Authorities with page references. Output both structured data (JSON) and formatted legal TOA text.
+
+## When to Use
+
+- Building a Table of Authorities for an appellate brief
+- Auditing citations in a legal document
+- Cross-referencing authorities across a brief
+
+## Before Starting
+
+Ask the user:
+1. **Which court is this brief for?** (Determines passim rules and any formatting requirements from local rules)
+2. **What format is the document in?** (PDF, text, DOCX)
+3. **Does the document already contain a TOA to exclude?**
+
+## Input Handling
+
+### Supported Document Formats
+
+- **PDF:** Use the Read tool. **Use the document's own page numbering** (footers like "– 1 –", headers like "Page: 8"), NOT raw PDF page numbers.
+- **Plain text / Markdown:** Look for explicit page markers (e.g., `## PAGE 1`). Ask the user to clarify format if not obvious.
+- **DOCX:** Convert to text first. Page boundaries are approximate without rendering — note this to the user.
+
+### Identifying the Substantive Content
+
+The skill extracts citations from scratch — do NOT rely on or reference any existing TOA in the document. Instead, identify the substantive pages to scan:
+
+1. **Find the body of the brief.** Look for section headings like "INTRODUCTION", "ARGUMENT", "STATEMENT OF THE CASE", "STATEMENT OF FACTS", and "CONCLUSION". These are the pages to scan.
+2. **Skip front matter.** Exclude cover pages, certificates of interest, tables of contents, any existing table of authorities, tables of abbreviations, and other preliminary material. These often use roman numeral pagination (i, ii, iii...).
+3. **Skip back matter.** Exclude certificates of compliance, certificates of service, and signature pages after the CONCLUSION.
+4. **Include footnotes.** Footnotes on substantive pages often contain important citations — sometimes entire string cites live in footnotes. Scan them thoroughly.
+5. **Exclude non-authority references.** References to other briefs in the case (e.g., "Blue Br.", "Red Br.", "Appellant's Br."), appendix citations ("Appx123"), and record citations ("R. at 45") are NOT legal authorities and should not appear in the TOA.
+
+## Citation Extraction Process
+
+Work through the document page by page. For each page, extract every legal citation. Track the **current page number** as you go.
+
+### Step 1: Identify All Citations
+
+Scan for these citation patterns:
+
+#### Cases
+- **Full case citation:** `Party v. Party, [volume] [reporter] [page] ([court] [year])`
+  - Example: `Reed v. Town of Gilbert, 576 U.S. 155, 163 (2015)`
+- **Westlaw/LEXIS citations:** `[year] WL [number]` format (e.g., `2013 WL 8844098`). Treat the same as reporter citations.
+- **Short forms** (`Id.`, party-name short forms, reporter-only, `supra`, informal references) — see Step 2 for resolution rules.
+
+#### Administrative Decisions
+- **PTAB decisions:** `[Party] v. [Party], IPR[year]-[number] (PTAB [date])`
+  - Example: `Apple Inc. v. Fintiv, Inc., IPR2020-00019 (PTAB Mar. 20, 2020)`
+- **Agency decisions:** FTC, SEC, FCC orders and opinions
+- These get their own category ("Administrative Decisions") between Cases and Constitutional Provisions
+
+#### Constitutional Provisions
+- `U.S. Const. art. [X], § [Y]`
+- `U.S. Const. amend. [X]`
+- State constitutional provisions: `[State] Const. art. [X], § [Y]`
+- **Informal references to specific amendments or articles:** "First Amendment", "Sixth Amendment", "Article III" → resolve to formal citations (e.g., "Sixth Amendment" → `U.S. Const. amend. VI`, "Article III" → `U.S. Const. art. III`). Include in TOA. However, vague references like "due process" or "equal protection" that could map to multiple provisions should NOT be included unless the brief specifies which clause.
+
+#### Statutes
+- Federal: `[title] U.S.C. § [section]` (with or without year)
+- State: various formats by jurisdiction
+- **Popular-name statutes:** References like "the Lanham Act", "the Adult Survivors Act", "ERISA" → resolve to formal citations (e.g., "Adult Survivors Act of 2022" → `N.Y. C.P.L.R. 214-j`). Flag with `informal_reference` if the formal citation is uncertain.
+- Include the specific subsection as cited — do NOT infer or generalize (e.g., if the brief cites `§ 230(c)(2)`, list that, not just `§ 230`)
+- If a bare section reference appears (e.g., "§ 230" without subsection), attempt to resolve it to a specific subsection cited nearby. If unresolvable, list it as cited and flag it for user review.
+
+#### Rules and Regulations
+- Federal Rules: `Fed. R. Civ. P. [rule]`, `Fed. R. App. P. [rule]`, `Fed. R. Evid. [rule]`
+- **Grouped rule references:** "Rules 413-415" or "Rules 413 and 414" count as a citation to EACH rule individually on that page. Expand and record each.
+- **Informal rule references:** "Rule 10" (meaning S. Ct. R. 10), "Rule 28(j)" (meaning Fed. R. App. P. 28(j)) — resolve to the formal citation form.
+- C.F.R. citations: `[title] C.F.R. § [section]`
+- Federal Register: `[volume] Fed. Reg. [page] ([year])`
+
+#### Legislative Materials
+- Congressional Record: `[volume] Cong. Rec. [page] ([year])` or `(daily ed. [date])`
+- Committee Reports: `H.R. Rep. No. [congress]-[number]` or `S. Rep. No. [congress]-[number]`
+- Hearing transcripts, bill text
+- Markup transcripts: `Transcript of Markup of H.R. [number] ([date])`
+- Legislative amendments: `Amendment #[N] to [bill], offered by [sponsor] ([date])`
+
+#### Other Authorities (Secondary Sources)
+- **Law review articles:** `[Author], [Title], [volume] [journal] [page] ([year])`
+- **Treatises:** `[volume] [Author], [Title] § [section] ([edition] [year])`
+- **Restatements:** `Restatement ([edition]) of [Subject] § [section] ([publisher] [year])`
+- **Legal encyclopedias:** `[volume] [Title] § [section] ([year])`
+- **Blog posts and online publications:** `[Author], [Title], [Publication] ([date]), [URL]`
+- **Industry reports and surveys:** `[Organization], [Title] ([year])` or `[Organization], [Title], available at [URL]`
+- **Forthcoming articles:** `[Author], [Title], [volume] [journal] (forthcoming [year])` — may include SSRN or other preprint URLs
+- **Web sources:** `[Organization], [Title or Description], available at [URL]` or bare `[Organization], [URL]` — increasingly common in amicus briefs
+
+### Step 2: Resolve Short Forms
+
+Maintain a **citation stack** as you read through the document sequentially:
+
+1. **Id. resolution:** `Id.` always resolves to the immediately preceding citation, even across page boundaries. In a chain (X, *Id.*, *Id.*, *Id.*), all resolve back to X. Track the "last cited authority" meticulously — a common error is resolving `Id.` to an authority from two citations back. Note: `Id.` sometimes refers to a non-authority (appendix, record cite) — check what precedes it. `Id.` can validly resolve to secondary sources.
+
+2. **Party-name short forms:** `[Party], [vol] [reporter] at [page]` → match to full citation with that reporter volume.
+
+3. **Reporter-only short forms:** `[vol] [reporter] at [page]` → match to full citation with that volume and reporter.
+
+4. **Supra references:** `[Author/Party], supra` → first full citation of that authority. `supra note [X]` cross-references a specific footnote — resolve by finding the citation in that footnote.
+
+5. **Informal references:** "the Paxton court", "Georgia-Pacific factors", "Daubert standard", "Alice step one" — resolve to the corresponding case. Flag with `informal_reference`.
+
+When a short form cannot be confidently resolved, flag it for user review rather than guessing.
+
+### Step 3: Aggregate Page References
+
+For each unique authority:
+- Collect all pages where it appears (via full citation OR any short form)
+- **Page-break citations:** When the citation text itself spans two pages, record BOTH pages. But a citation's page is determined by where the **citation text** appears, not where the surrounding sentence continues. Three scenarios:
+  - *Citation straddles break* (e.g., "Bristol-Myers Squibb, 582 U.S." on p.25, "at 264" on p.26) → record **both** pages
+  - *Sentence wraps but citation is on one page* (e.g., "consistent with *Bristol-Myers Squibb* and the cases" ends p.25, sentence continues on p.26 with non-citation text) → record **only** the page where the citation text appears
+  - *String cite wraps* → only authorities whose actual citation text appears on a given page get that page number
+- **Deduplicate** page numbers — each page listed only once
+- Sort page numbers in ascending order
+- **Passim rules** (determined by court — ask user if unknown):
+
+| Court | Passim allowed? |
+|-------|----------------|
+| SCOTUS (Rule 34) | No — list every page |
+| D.C. Circuit | No |
+| 9th Circuit | Discouraged |
+| Most other courts | Yes, at 5+ pages |
+
+When in doubt, list all pages individually — it is never wrong to be specific.
+
+### Step 4: Categorize
+
+Assign each authority to exactly one category. Use these categories in this order:
+
+1. **Cases** (always first, alphabetized by first party name)
+2. **Administrative Decisions** (PTAB decisions, agency orders — alphabetized by first party name). Omit this category if none exist; some briefs fold these into Cases.
+3. **Constitutional Provisions** (federal before state; amendments in numerical order)
+4. **Statutes** (federal before state; by title and section number)
+5. **Rules and Regulations** (federal rules, then C.F.R., then Fed. Reg.)
+6. **Legislative Materials** (congressional records, committee reports, hearing transcripts, markup transcripts)
+7. **Other Authorities** (law review articles, treatises, restatements, blog posts, industry reports, web sources — alphabetized by author/organization)
+
+Omit categories with no entries.
+
+### Step 5: Handle Edge Cases and Ambiguities
+
+**Parenthetical citations — distinguish the type:**
+- **`(quoting [Authority])`** — the brief is using language from that authority. The authority **gets a page entry.** No flag needed.
+- **`(holding [description])`** — describes the cited case's holding; this is a parenthetical on the primary citation, not a separate authority.
+- **`(citing [Authority])`** — describes what the *cited case* did in its opinion. The brief is NOT independently citing that authority on this page. The default is that the authority does **NOT** get a page entry from this parenthetical alone. (However, if the authority is cited independently elsewhere in the brief, it gets entries for those other pages.) **Note:** Some practitioners include `(citing X)` references in the TOA. Flag this as a judgment call for the user if encountered.
+- **`(discussing [Authority])`, `(applying [Authority])`, `(overruling [Authority])`** — same as `(citing ...)`: these describe what the primary case did, not what the brief is doing.
+
+**Rule of thumb:** Ask "Is the *brief* invoking this authority, or is the brief just describing what *another case* did with this authority?" Only the former gets a TOA page entry.
+
+**Subsequent history:** Include all subsequent history as part of the citation:
+- `cert. denied`, `cert. granted`, `aff'd`, `rev'd`, `vacated`, `remanded`
+- `modified by`, `supplemented by`, `clarified by`
+- Example: `Force v. Facebook, Inc., 934 F.3d 53 (2d Cir. 2019), cert. denied, 140 S. Ct. 2761 (2020)`
+- Example: `Hartford-Empire Co. v. United States, 323 U.S. 386 (1945), modified by 324 U.S. 570 (1945)`
+
+**Multiple cases with same party names:** When the same parties appear in multiple cases (e.g., three different *Microsoft v. Motorola* decisions), each gets its own TOA entry. Short-form resolution must use the reporter volume/page to disambiguate — `Microsoft, 696 F.3d at 876` resolves to the specific case at 696 F.3d 872, not the others.
+
+**S. Ct. reporter:** Treat `S. Ct.` citations identically to `U.S.` citations.
+
+**String cites:** Each authority in a string cite gets its own entry.
+
+**Signal prefixes** (`Cf.`, `contra`, `but see`, `see generally`, etc.): Extract the authority regardless of signal.
+
+**Statute subsections:** When a brief cites `§§ 315(a), (d), and (e)`, default to listing each subsection separately. Flag for user if uncertain whether to consolidate.
+
+## Output
+
+### Structured Data (Primary)
+
+Produce a JSON array. Each entry:
+
+```json
+{
+  "citation": "Reed v. Town of Gilbert, 576 U.S. 155 (2015)",
+  "category": "Cases",
+  "pages": [1, 2],
+  "short_forms_found": ["Id. at 163", "Reed, 576 U.S. at 163"],
+  "flags": []
+}
+```
+
+The `flags` array captures any ambiguities or issues for user review:
+- `"unresolved_short_form"` — could not link a short form to a full citation
+- `"ambiguous_section_reference"` — bare statute section without subsection
+- `"informal_reference"` — resolved from informal text (e.g., "the Paxton court")
+- `"uncertain_category"` — not clear which category applies
+
+### Formatted TOA (Secondary)
+
+Produce a formatted Table of Authorities matching standard legal conventions:
+
+```
+TABLE OF AUTHORITIES
+
+                              Page(s)
+
+Cases
+
+Ashcroft v. Free Speech Coalition,
+  535 U.S. 234 (2002) ............................. 3
+
+Barr v. American Association of
+  Political Consultants, Inc.,
+  591 U.S. 610 (2020) ............................. 1
+
+Reed v. Town of Gilbert,
+  576 U.S. 155 (2015) .......................... 1, 2
+
+[etc.]
+
+Constitutional Provisions
+
+U.S. Const. amend. I .............................. 1
+
+Statutes
+
+47 U.S.C. § 230(c)(2) ............................ 5
+47 U.S.C. § 230(f)(4) (2018) ..................... 3
+
+[etc.]
+```
+
+**Formatting rules:**
+- Case names in italics (use `*italic*` in markdown output, or instruct the user to italicize in their word processor)
+- Indent continuation lines for long citations
+- Right-align page numbers with dot leaders
+- Page numbers comma-separated; use "passim" only if the court permits it (see passim rules in Step 3)
+- Alphabetize within each category (cases by first party name; statutes by title/section; secondary sources by author last name)
+- Omit pinpoint pages — use only starting page (e.g., `576 U.S. 155`, not `576 U.S. 155, 163`)
+- Preserve treatise citation form including volume number — do NOT rearrange into last-name-first format
+- Flag bare section references (e.g., "§ 230 was enacted to promote...") as `ambiguous_section_reference` for user review
+
+## Verification Checklist
+
+After generating the TOA, verify:
+
+- [ ] Every citation in the brief (including parentheticals) has a TOA entry
+- [ ] Every short form resolves to a full citation
+- [ ] No duplicate page numbers for any entry
+- [ ] Categories are in correct order
+- [ ] Entries are alphabetized within categories
+- [ ] Passim used only if the target court permits it; otherwise all pages listed individually
+- [ ] Flags exist for any ambiguous resolutions
+- [ ] No entries from excluded sections (existing TOA, table of contents)
+
+## Common Mistakes
+
+Quick-reference for errors not obvious from the steps above:
+
+| Mistake | Fix |
+|---------|-----|
+| Short form on different page not linked | Short forms add the NEW page to the full citation's page list |
+| Citation spanning page break gets one page | Record BOTH pages when the citation text itself straddles the break |
+| Sentence wraps → citation credited to next page | The citation's page is where the citation *text* appears, not where the sentence continues |
+| Id. resolved to wrong authority in sequence | Track last-cited precisely — when authorities appear in quick succession, Id. resolves to the very last one |
+
+## Iterative Improvement
+
+When you encounter a citation pattern not covered above, or when something is ambiguous:
+
+1. Flag it in the structured output
+2. Note the pattern for the user
+3. Suggest whether the skill should be updated to handle it
+
+This allows the skill to improve over time as new citation patterns are encountered.
