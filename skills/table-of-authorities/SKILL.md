@@ -5,6 +5,12 @@ description: Use when extracting citations from a legal brief to build a Table o
 
 # Table of Authorities Extraction
 
+## Prerequisites
+
+This skill uses the citation taxonomy, short-form resolution rules, proposition/parenthetical handling, and flag vocabulary defined in the `citation-toolkit` skill. Read `citation-toolkit` first; the steps below refer to its definitions by name rather than restating them. Content that is specific to building a Table of Authorities — the Administrative Decisions category, page-reference aggregation, passim rules, categorization, and the formatted-TOA output — stays in this skill.
+
+When dispatching subtask subagents (citation parsing, short-form resolution, category assignment), follow the **Model Tiers for Subtasks** section of `citation-toolkit` — most per-citation mechanical work in this skill is Haiku-tier.
+
 ## Overview
 
 Extract every legal citation from a brief, resolve short forms to their full citations, categorize each authority, and produce a Table of Authorities with page references. Output both structured data (JSON) and formatted legal TOA text.
@@ -46,72 +52,36 @@ Work through the document page by page. For each page, extract every legal citat
 
 ### Step 1: Identify All Citations
 
-Scan for these citation patterns:
+Scan for citations using the **Citation Taxonomy** and **Short Forms** sections of `citation-toolkit` (Cases, Constitutional Provisions, Statutes, Rules and Regulations, Legislative Materials, Secondary Sources, Short Forms). The toolkit covers Westlaw/LEXIS citations, informal references, popular-name statutes, grouped and informal rule references, state constitutional provisions, and all the parenthetical handling rules.
 
-#### Cases
-- **Full case citation:** `Party v. Party, [volume] [reporter] [page] ([court] [year])`
-  - Example: `Reed v. Town of Gilbert, 576 U.S. 155, 163 (2015)`
-- **Westlaw/LEXIS citations:** `[year] WL [number]` format (e.g., `2013 WL 8844098`). Treat the same as reporter citations.
-- **Short forms** (`Id.`, party-name short forms, reporter-only, `supra`, informal references) — see Step 2 for resolution rules.
+Two categorization refinements this skill adds on top of the toolkit's taxonomy:
 
-#### Administrative Decisions
+#### Administrative Decisions (ToA-specific category)
+
+Treat these as a **separate category** in the output TOA, between Cases and Constitutional Provisions. Citations still use the toolkit's Case or administrative patterns:
+
 - **PTAB decisions:** `[Party] v. [Party], IPR[year]-[number] (PTAB [date])`
   - Example: `Apple Inc. v. Fintiv, Inc., IPR2020-00019 (PTAB Mar. 20, 2020)`
 - **Agency decisions:** FTC, SEC, FCC orders and opinions
-- These get their own category ("Administrative Decisions") between Cases and Constitutional Provisions
 
-#### Constitutional Provisions
-- `U.S. Const. art. [X], § [Y]`
-- `U.S. Const. amend. [X]`
-- State constitutional provisions: `[State] Const. art. [X], § [Y]`
-- **Informal references to specific amendments or articles:** "First Amendment", "Sixth Amendment", "Article III" → resolve to formal citations (e.g., "Sixth Amendment" → `U.S. Const. amend. VI`, "Article III" → `U.S. Const. art. III`). Include in TOA. However, vague references like "due process" or "equal protection" that could map to multiple provisions should NOT be included unless the brief specifies which clause.
+Omit this category if none exist; some briefs fold these into Cases.
 
-#### Statutes
-- Federal: `[title] U.S.C. § [section]` (with or without year)
-- State: various formats by jurisdiction
-- **Popular-name statutes:** References like "the Lanham Act", "the Adult Survivors Act", "ERISA" → resolve to formal citations (e.g., "Adult Survivors Act of 2022" → `N.Y. C.P.L.R. 214-j`). Flag with `informal_reference` if the formal citation is uncertain.
-- Include the specific subsection as cited — do NOT infer or generalize (e.g., if the brief cites `§ 230(c)(2)`, list that, not just `§ 230`)
-- If a bare section reference appears (e.g., "§ 230" without subsection), attempt to resolve it to a specific subsection cited nearby. If unresolvable, list it as cited and flag it for user review.
+#### Statutes — bare-section handling for TOA
 
-#### Rules and Regulations
-- Federal Rules: `Fed. R. Civ. P. [rule]`, `Fed. R. App. P. [rule]`, `Fed. R. Evid. [rule]`
-- **Grouped rule references:** "Rules 413-415" or "Rules 413 and 414" count as a citation to EACH rule individually on that page. Expand and record each.
-- **Informal rule references:** "Rule 10" (meaning S. Ct. R. 10), "Rule 28(j)" (meaning Fed. R. App. P. 28(j)) — resolve to the formal citation form.
-- C.F.R. citations: `[title] C.F.R. § [section]`
-- Federal Register: `[volume] Fed. Reg. [page] ([year])`
+If a bare section reference appears (e.g., "§ 230" without subsection), attempt to resolve it to a specific subsection cited nearby. If unresolvable, list it as cited and flag `ambiguous_section_reference` (from `citation-toolkit`'s flag vocabulary).
 
-#### Legislative Materials
-- Congressional Record: `[volume] Cong. Rec. [page] ([year])` or `(daily ed. [date])`
-- Committee Reports: `H.R. Rep. No. [congress]-[number]` or `S. Rep. No. [congress]-[number]`
-- Hearing transcripts, bill text
-- Markup transcripts: `Transcript of Markup of H.R. [number] ([date])`
-- Legislative amendments: `Amendment #[N] to [bill], offered by [sponsor] ([date])`
+#### State constitutional provisions
 
-#### Other Authorities (Secondary Sources)
-- **Law review articles:** `[Author], [Title], [volume] [journal] [page] ([year])`
-- **Treatises:** `[volume] [Author], [Title] § [section] ([edition] [year])`
-- **Restatements:** `Restatement ([edition]) of [Subject] § [section] ([publisher] [year])`
-- **Legal encyclopedias:** `[volume] [Title] § [section] ([year])`
-- **Blog posts and online publications:** `[Author], [Title], [Publication] ([date]), [URL]`
-- **Industry reports and surveys:** `[Organization], [Title] ([year])` or `[Organization], [Title], available at [URL]`
-- **Forthcoming articles:** `[Author], [Title], [volume] [journal] (forthcoming [year])` — may include SSRN or other preprint URLs
-- **Web sources:** `[Organization], [Title or Description], available at [URL]` or bare `[Organization], [URL]` — increasingly common in amicus briefs
+In addition to the federal patterns covered in `citation-toolkit`, include state provisions: `[State] Const. art. [X], § [Y]`.
 
 ### Step 2: Resolve Short Forms
 
-Maintain a **citation stack** as you read through the document sequentially:
+Follow the **Short Forms** rules in `citation-toolkit` (Id., party-name, reporter-only, supra/supra note, informal references), maintaining a citation stack as you read. Flag unresolved short forms with `unresolved_short_form` (from the shared flag vocabulary) rather than guessing.
 
-1. **Id. resolution:** `Id.` always resolves to the immediately preceding citation, even across page boundaries. In a chain (X, *Id.*, *Id.*, *Id.*), all resolve back to X. Track the "last cited authority" meticulously — a common error is resolving `Id.` to an authority from two citations back. Note: `Id.` sometimes refers to a non-authority (appendix, record cite) — check what precedes it. `Id.` can validly resolve to secondary sources.
+Two ToA-specific caveats worth remembering:
 
-2. **Party-name short forms:** `[Party], [vol] [reporter] at [page]` → match to full citation with that reporter volume.
-
-3. **Reporter-only short forms:** `[vol] [reporter] at [page]` → match to full citation with that volume and reporter.
-
-4. **Supra references:** `[Author/Party], supra` → first full citation of that authority. `supra note [X]` cross-references a specific footnote — resolve by finding the citation in that footnote.
-
-5. **Informal references:** "the Paxton court", "Georgia-Pacific factors", "Daubert standard", "Alice step one" — resolve to the corresponding case. Flag with `informal_reference`.
-
-When a short form cannot be confidently resolved, flag it for user review rather than guessing.
+- **Id. chains across pages:** In a chain (X, *Id.*, *Id.*, *Id.*), all resolve back to X. Each *Id.* adds the page where it appears to X's page list (this is what Step 3 aggregates).
+- **Id. referring to non-authorities:** `Id.` sometimes refers to an appendix or record cite rather than a legal authority — check what precedes it before resolving.
 
 ### Step 3: Aggregate Page References
 
@@ -150,11 +120,7 @@ Omit categories with no entries.
 
 ### Step 5: Handle Edge Cases and Ambiguities
 
-**Parenthetical citations — distinguish the type:**
-- **`(quoting [Authority])`** — the brief is using language from that authority. The authority **gets a page entry.** No flag needed.
-- **`(holding [description])`** — describes the cited case's holding; this is a parenthetical on the primary citation, not a separate authority.
-- **`(citing [Authority])`** — describes what the *cited case* did in its opinion. The brief is NOT independently citing that authority on this page. The default is that the authority does **NOT** get a page entry from this parenthetical alone. (However, if the authority is cited independently elsewhere in the brief, it gets entries for those other pages.) **Note:** Some practitioners include `(citing X)` references in the TOA. Flag this as a judgment call for the user if encountered.
-- **`(discussing [Authority])`, `(applying [Authority])`, `(overruling [Authority])`** — same as `(citing ...)`: these describe what the primary case did, not what the brief is doing.
+**Parenthetical citations:** Follow the **Parenthetical Handling** rules in `citation-toolkit`. For ToA purposes specifically: `(quoting X)` gets a page entry for X; `(citing X)`, `(discussing X)`, `(applying X)`, `(overruling X)` do not (flag `citing_parenthetical` as a judgment call per the shared vocabulary). `(holding [description])` is not a separate authority.
 
 **Rule of thumb:** Ask "Is the *brief* invoking this authority, or is the brief just describing what *another case* did with this authority?" Only the former gets a TOA page entry.
 
@@ -190,11 +156,7 @@ Produce a JSON array. Each entry:
 }
 ```
 
-The `flags` array captures any ambiguities or issues for user review:
-- `"unresolved_short_form"` — could not link a short form to a full citation
-- `"ambiguous_section_reference"` — bare statute section without subsection
-- `"informal_reference"` — resolved from informal text (e.g., "the Paxton court")
-- `"uncertain_category"` — not clear which category applies
+The `flags` array captures any ambiguities or issues for user review. Use the names defined in `citation-toolkit`'s **Flag Vocabulary** — for ToA, the relevant ones are `unresolved_short_form`, `ambiguous_section_reference`, `informal_reference`, `uncertain_category`, and `citing_parenthetical`.
 
 ### Formatted TOA (Secondary)
 

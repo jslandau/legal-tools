@@ -1,11 +1,19 @@
 {
   "name": "legal-tools",
-  "version": "0.1.0",
-  "description": "Tools for legal document preparation, including Table of Authorities extraction",
+  "version": "0.4.2",
+  "description": "Tools for legal document preparation: Table of Authorities extraction, citation verification (cite-checking), and a shared citation-toolkit consumed by both",
   "skills": [
+    {
+      "name": "citation-toolkit",
+      "path": "skills/citation-toolkit/SKILL.md"
+    },
     {
       "name": "table-of-authorities",
       "path": "skills/table-of-authorities/SKILL.md"
+    },
+    {
+      "name": "cite-checking",
+      "path": "skills/cite-checking/SKILL.md"
     }
   ]
 }
