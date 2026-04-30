@@ -1,0 +1,22 @@
+{
+    "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+    "name": "legal-tools",
+    "version": "0.4.2",
+    "description": "Tools for legal document preparation: Table of Authorities extraction, citation verification, and shared citation toolkit",
+    "owner": {
+        "name": "jsl",
+        "email": "joshua.s.landau@gmail.com"
+    },
+    "plugins": [
+        {
+            "name": "legal-tools",
+            "description": "Table of Authorities extraction, citation verification (cite-checking), and shared citation toolkit",
+            "version": "0.4.2",
+            "source": "./plugins/legal-tools",
+            "author": {
+                "name": "jsl",
+                "email": "joshua.s.landau@gmail.com"
+            }
+        }
+    ]
+}

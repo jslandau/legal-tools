@@ -1,0 +1,18 @@
+{
+    "name": "legal-tools",
+    "version": "0.4.2",
+    "description": "Tools for legal document preparation: Table of Authorities extraction, citation verification (cite-checking), and shared citation toolkit",
+    "author": {
+        "name": "jsl",
+        "email": "joshua.s.landau@gmail.com"
+    },
+    "homepage": "https://github.com/jslandau/legal-tools",
+    "repository": "https://github.com/jslandau/legal-tools",
+    "license": "UNLICENSED",
+    "keywords": [
+        "legal",
+        "citations",
+        "table-of-authorities",
+        "cite-checking"
+    ]
+}
