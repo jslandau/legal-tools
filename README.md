@@ -45,6 +45,11 @@ Shared vocabulary used by all three skills above: citation taxonomy, short-form 
 
 ## Installation
 
+First, add the marketplace.
+```
+/plugin marketplace add jslandau/legal-tools
+```
+Then install the plugin, either via the /plugin TUI or via the following command.
 ```
 /plugin install legal-tools@legal-tools
 ```
