@@ -2,9 +2,11 @@
 
 A Claude Code plugin with three skills for legal document work: extracting a Table of Authorities, verifying citations, and tracing a citation's lineage.
 
-US case-law lookups go through the [claude.ai CourtListener MCP server](https://www.courtlistener.com/help/api/) when it's available (token required but setup when MCP is, batched citation verification via eyecite + citation-lookup in one call), with a scripted REST-API fallback for environments without the MCP.  MCP support appears to work but hasn't been extensively tested.
+US case-law lookups go through the [claude.ai CourtListener MCP server](https://www.courtlistener.com/help/api/) when it's available (token required but setup when MCP is, batched citation verification via eyecite + citation-lookup in one call), with a scripted REST-API fallback for environments without the MCP.  
 
-You will get some permissions requests to run python against documents in /tmp.  This is normal.
+MCP support appears to work but hasn't been extensively tested, please double-check (and please file any bugs you encounter as issues).
+
+You will get some permissions requests, including sed and python processing documents in /tmp.  This is normal.
 
 ## Skills
 
