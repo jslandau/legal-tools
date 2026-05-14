@@ -219,7 +219,7 @@ When the `claude.ai CourtListener` MCP server is loaded, use these tools instead
 | Task | MCP tool | Notes |
 |------|----------|-------|
 | Parse citations from text (local, no API) | `mcp__claude_ai_CourtListener__extract_citations` | Runs eyecite locally; resolves `Id.`/`supra`/short cites if `resolve=true`. No rate limit. Use this whenever you only need the citation strings (e.g., TOA scanning). |
-| Verify a batch of citations against CourtListener | `mcp__claude_ai_CourtListener__analyze_citations` | Extracts citations from text **and** verifies each unique case citation against the citation-lookup API in one call. Returns case name, date, cite count, verification status, opinion IDs. Replaces Step 1 (citation-lookup) for nearly all use cases. For >250 unique cites, returns a `job_id` — resume with `resume_citation_analysis`. |
+| Verify a batch of citations against CourtListener | `mcp__claude_ai_CourtListener__analyze_citations` | Extracts citations from text **and** verifies each unique case citation against the citation-lookup API in one call. Returns case name, date, cite count, verification status, and a **`Cluster ID`** for each verified case (NOT an opinion ID — see Step 2 below). Replaces Step 1 (citation-lookup) for nearly all use cases. For >250 unique cites, returns a `job_id` — resume with `resume_citation_analysis`. |
 | Resume a long verification job | `mcp__claude_ai_CourtListener__resume_citation_analysis` | Use after `analyze_citations` returns pending citations. `wait=true` sleeps through a short rate-limit window automatically. |
 | Look up a specific opinion by ID | `mcp__claude_ai_CourtListener__get_endpoint_item` with `endpoint_id="opinions"` | Replaces Step 2 (opinion fetch). **Always pass `fields=[...]`** — opinion text fields are huge. Useful field allowlists below. |
 | Look up an opinion cluster (parallel cites, sub-opinions, case metadata) | `get_endpoint_item` with `endpoint_id="clusters"` | When `analyze_citations` returns a `cluster_id` and you need its sub-opinions list, court, date, or canonical case name. |
@@ -308,15 +308,33 @@ For batches of citations already in a document, pass the document text — eyeci
 
 #### Step 2 (MCP) — Fetch the opinion text
 
-Once you have an `opinion_id` from Step 1:
+**Critical:** `analyze_citations` returns a **`Cluster ID`**, not an opinion ID. The `opinions` endpoint takes an opinion ID; passing a cluster ID will silently return whatever unrelated opinion happens to share that integer (or, for older single-opinion clusters, the correct opinion only by coincidence). You MUST resolve cluster → opinion first.
+
+**Step 2a — Resolve cluster ID to opinion ID(s):**
+
+```
+call_endpoint(
+  endpoint_id="clusters",
+  query={"id": <cluster_id_from_analyze_citations>},
+  num_results=1,
+)
+```
+
+The response's `sub_opinions` array contains one or more opinion URIs of the form `https://www.courtlistener.com/api/rest/v4/opinions/<opinion_id>/`. Pick the right one using the **Choosing the right sub-opinion within a cluster** guidance above (prefer `020lead`, then `010combined`, switching to dissent/concurrence only if the brief specifically cites one). You typically need to fetch each candidate sub-opinion to read its `type` field, since `call_endpoint("clusters", ...)` returns URIs, not the `type` value directly — fetch them one at a time until you find the one matching your selection rule.
+
+**Step 2b — Fetch the opinion text:**
 
 ```
 get_endpoint_item(
   endpoint_id="opinions",
-  item_id=<opinion_id>,
-  fields=["id", "html_with_citations", "plain_text"],   # html_with_citations primary; plain_text as fallback
+  item_id=<opinion_id_from_sub_opinions>,
+  fields=["id", "type", "html_with_citations", "plain_text"],
 )
 ```
+
+Always include `"type"` in `fields` so you can confirm the sub-opinion is the one you intended.
+
+**Sanity check after fetching:** If the opinion's text does not contain the cited party names, reporter abbreviation, or any star-pagination marker overlapping the cited page range, you have fetched the wrong opinion. Re-resolve via `call_endpoint("clusters", ...)` and check the `sub_opinions` array. This check costs almost nothing and catches both the cluster-as-opinion-ID error and CourtListener's occasional cross-cluster ingest mismatches.
 
 For downstream pincite-page slicing or anchor extraction, write the JSON to a temp file and operate on it locally — same downstream guidance as the scripted path:
 
@@ -342,7 +360,7 @@ curl -s -X POST "https://www.courtlistener.com/api/rest/v4/citation-lookup/" \
   --data "volume=[VOL]&reporter=[REPORTER]&page=[PAGE]"
 ```
 
-Returns a `clusters` array. Identify the correct cluster by matching `case_name`, `date_filed`, and `citations`. Note the opinion ID from `sub_opinions`.
+Returns a `clusters` array. Identify the correct cluster by matching `case_name`, `date_filed`, and `citations`. The `sub_opinions` field contains an array of opinion URIs — extract the numeric **opinion ID** from one of these URIs (NOT the cluster's own `id`, which is different) using the sub-opinion selection guidance above. The opinion ID is what Step 2 needs.
 
 **Step 2 — Fetch the opinion text**
 
