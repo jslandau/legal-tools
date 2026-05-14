@@ -54,6 +54,10 @@ Work through the document page by page. For each page, extract every legal citat
 
 Scan for citations using the **Citation Taxonomy** and **Short Forms** sections of `citation-toolkit` (Cases, Constitutional Provisions, Statutes, Rules and Regulations, Legislative Materials, Secondary Sources, Short Forms). The toolkit covers Westlaw/LEXIS citations, informal references, popular-name statutes, grouped and informal rule references, state constitutional provisions, and all the parenthetical handling rules.
 
+**Accelerator (MCP path):** When the CourtListener MCP is available, bootstrap extraction by calling `mcp__claude_ai_CourtListener__extract_citations(text=<page or section text>, resolve=true)` for each substantive page. This runs eyecite locally (no API calls, no rate limit) and returns parsed citations with `Id.`/`supra`/short cites already resolved — which short-circuits Step 2 below for the citations eyecite recognizes. After the bootstrap, walk the page yourself to catch what eyecite misses: administrative decisions (PTAB, FTC, SEC, FCC), state-constitutional provisions, EU/international cases, popular-name statutes ("the Lanham Act"), and informal references ("First Amendment"). Page tracking is the skill's responsibility — record the current page number with each citation as you scan.
+
+Do NOT call `analyze_citations` for TOA work — it adds CourtListener verification on top of extraction, which is wasted effort for TOA (TOA only needs the citation strings and their pages, not their verification status).
+
 Two categorization refinements this skill adds on top of the toolkit's taxonomy:
 
 #### Administrative Decisions (ToA-specific category)

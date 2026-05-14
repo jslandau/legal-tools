@@ -27,7 +27,7 @@ Collect four inputs from the user before running any API calls:
 
 2. **Seed citation** — the citation that supposedly supports the proposition. Parsed in Stage 2 using `citation-toolkit`'s Case schema. If the user provides a short form (`Id.`, `supra`), a statute, a rule, a regulation, or a non-US case, stop and explain: this PoC traces propositions through US case law only; those other categories either lack a usable citation graph or require sources outside CourtListener.
 
-3. **CourtListener API token** — required. Free tokens are available at courtlistener.com/sign-in/. Authenticated accounts get 5,000 requests/hour.
+3. **CourtListener access.** If the `claude.ai CourtListener` MCP server is available, no token is needed — Stage 2 and the per-hop fetches use the MCP directly. Otherwise, a CourtListener API token is required (free at courtlistener.com/sign-in/; authenticated accounts get 5,000 requests/hour).
 
 4. **Sibling-branch tracing** — when a hop encounters a string cite with multiple predecessors for the same proposition, how should chain-cite handle the siblings?
    - **Follow only the strongest-signal case** (default — typically the first in the string per Bluebook 1.4; siblings are still recorded in the hop's JSON entry as `also_cited_for_same_proposition` but not recursed into)
@@ -48,9 +48,18 @@ Validate the four inputs, abort-with-explanation on the out-of-scope cases liste
 
 ## Stage 2 — Seed Resolution
 
-Parse the seed citation using `citation-toolkit`'s Case schema. Resolve to an opinion using `citation-toolkit`'s **CourtListener API** section: Step 1 (citation-lookup), Step 2 (opinions/{id}), identity verification. If CourtListener fails, follow the escalation chain defined there (Justia → direct court → Google Scholar → ask user). If the chain fully exhausts, abort with a `seed_citation_unverifiable` message — there is no chain to trace if we can't find the starting opinion.
+Parse the seed citation using `citation-toolkit`'s Case schema. Resolve to an opinion using `citation-toolkit`'s **CourtListener API** section:
 
-Once the seed opinion is fetched, record it as **Hop 0** with `relationship_to_prior_hop: "seed"`. Proceed to Stage 3 to localize the proposition inside it.
+- **MCP path (preferred):** call `mcp__claude_ai_CourtListener__analyze_citations(text=<seed citation string>)` to verify the cite and get the cluster/opinion IDs in one call. Then fetch the chosen sub-opinion via `mcp__claude_ai_CourtListener__get_endpoint_item(endpoint_id="opinions", item_id=<opinion_id>, fields=["id", "html_with_citations", "plain_text"])`. Write the returned JSON to a temp file (e.g., `/tmp/opinion-<id>.json`) — Stages 3–4 pass that path to `chain_hop.py`.
+- **Fallback (no MCP):** Step 1 (citation-lookup) and Step 2 (opinions/{id}) from `citation-toolkit`, with the user-supplied token.
+
+**Sub-opinion selection.** When the cluster's `sub_opinions` array has more than one entry, apply the **Choosing the right sub-opinion** rule in `citation-toolkit`: prefer the `020lead` opinion unless the seed citation explicitly references a dissent or concurrence. The `020lead` sub-opinion typically carries reporter-pagination (`*N` markers) from the Harvard CAP ingest, which is what the match ladder relies on.
+
+**Upfront pagination check.** After fetching, run `citation-toolkit`'s pagination-mode detection on the opinion's `html_with_citations`. Record `pagination_mode` on Hop 0 (and on every subsequent hop). When `pagination_mode != "reporter"`, the per-hop pincite-page slicing in Stage 3 will fall through to whole-opinion semantic search — flag the hop accordingly so the output report surfaces the localization uncertainty.
+
+Apply identity verification per `citation-toolkit`. If CourtListener fails, follow the escalation chain defined there (Justia → direct court → Google Scholar → ask user). If the chain fully exhausts, abort with a `seed_citation_unverifiable` message — there is no chain to trace if we can't find the starting opinion.
+
+Once the seed opinion is fetched and written to disk, record it as **Hop 0** with `relationship_to_prior_hop: "seed"`. Proceed to Stage 3 to localize the proposition inside it.
 
 Add the seed opinion's ID to `visited_opinion_ids`.
 
@@ -58,21 +67,23 @@ Add the seed opinion's ID to `visited_opinion_ids`.
 
 ## Per-Hop Helper Script
 
-This skill ships with `chain_hop.py` alongside `SKILL.md`. It is the **mechanical** half of each hop — fetching opinion text, filtering to the pincite page, and extracting outbound citation anchors. It does **no** scoring of which passage "best matches" the proposition: that is a semantic question, answered by a Sonnet-tier subagent, not by regex.
+This skill ships with `chain_hop.py` alongside `SKILL.md`. It is the **mechanical** half of each hop — filtering an already-fetched opinion JSON to the pincite page and extracting outbound citation anchors. It does **no** network I/O and **no** scoring of which passage "best matches" the proposition: fetching is the skill's job (MCP preferred, REST fallback); semantic relevance is a Sonnet-tier judgment, not a regex one.
 
-Each hop is a three-step cycle:
+Each hop is a four-step cycle:
 
-1. **`chain_hop.py page`** (Haiku-tier / direct script call). Returns the full plain-text of the pincite page plus a sentence-level breakdown. No ranking.
+1. **Fetch the current hop's opinion JSON.** Use `mcp__claude_ai_CourtListener__get_endpoint_item(endpoint_id="opinions", item_id=<opinion_id>, fields=["id", "html_with_citations", "plain_text", "xml_harvard"])` (or, without the MCP, the REST `opinions/{id}/` endpoint). Write the response to a path like `/tmp/opinion-<id>.json`. Reuse an existing file if present — the script reads, never writes, this file.
 
-2. **Semantic selection** (Sonnet-tier subagent). Given the proposition being traced and the page text, the subagent picks which sentence carries the same rule and produces the drift annotation (`null` for verbatim, or `rephrases:` / `broadens:` / `narrows:` with a one-line note). If no sentence on the page carries the rule, the subagent reports `proposition_not_found_in_opinion`.
+2. **`chain_hop.py page`** (Haiku-tier / direct script call). Returns the full plain-text of the pincite page plus a sentence-level breakdown. No ranking.
 
-3. **`chain_hop.py anchors`** (Haiku-tier / direct script call). Given the sentence the Sonnet step chose, extracts the outbound citation anchors inside or immediately after that sentence and decides the next hop, terminal reason, or cycle.
+3. **Semantic selection** (Sonnet-tier subagent). Given the proposition being traced and the page text, the subagent picks which sentence carries the same rule and produces the drift annotation (`null` for verbatim, or `rephrases:` / `broadens:` / `narrows:` with a one-line note). If no sentence on the page carries the rule, the subagent reports `proposition_not_found_in_opinion`.
+
+4. **`chain_hop.py anchors`** (Haiku-tier / direct script call). Given the sentence the Sonnet step chose, extracts the outbound citation anchors inside or immediately after that sentence and decides the next hop, terminal reason, or cycle.
 
 ### Subcommand: `page`
 
 ```bash
 python3 <skill-dir>/chain_hop.py page \
-  --opinion-id N --pincite PAGE --token $TOKEN
+  --opinion-json /tmp/opinion-<N>.json --pincite PAGE
 ```
 
 Returns JSON with `page_plain_text` (the full page), `sentences` (sentence-level chunks), and `page_start_offset` / `page_end_offset`. If the page marker is not found, returns `page_marker_found: false` and a whole-opinion fallback.
@@ -81,28 +92,29 @@ Returns JSON with `page_plain_text` (the full page), `sentences` (sentence-level
 
 ```bash
 python3 <skill-dir>/chain_hop.py anchors \
-  --opinion-id N \
+  --opinion-json /tmp/opinion-<N>.json \
   --sentence "verbatim passage the Sonnet step chose" \
-  --token $TOKEN --visited "id1,id2,..."
+  --visited "id1,id2,..."
 ```
 
-Returns `next_hop`, `siblings`, `non_case_anchors`, `cycle_anchors`, and — when there is no usable outbound citation — a `terminal_reason` drawn from Stage 4d. Pass the prior chain's opinion IDs in `--visited` for cycle detection.
+Returns `next_hop`, `siblings`, `non_case_anchors`, `cycle_anchors`, and — when there is no usable outbound citation — a `terminal_reason` drawn from Stage 4d. Pass the prior chain's opinion IDs in `--visited` for cycle detection. The opinion JSON must contain `html_with_citations` (request it explicitly in the `fields` allowlist when fetching).
 
 ### Why no lexical scoring
 
-An earlier iteration of this script scored candidate passages by term specificity and char-distance from the page marker. That misfires predictably: a pincite names a whole page (~400 words), and lexical proximity is not semantic relevance. The rule passage on page 280 might sit 2000+ chars after the `*280` marker; a general term ("Eleventh Amendment") might appear 50 chars after it in irrelevant context. Any such heuristic will occasionally return a confident wrong answer. Semantic match is Sonnet's job — do not re-introduce lexical scoring here.
+An earlier iteration of this script scored candidate passages by term specificity and char-distance from the page marker. That misfires predictably: a pincite names a whole page (~400 words), and lexical proximity is not semantic relevance. The rule passage on page 280 might sit 2000+ chars after the `*280` marker; a general term ("Eleventh Amendment") might appear 50 chars after it in irrelevant context. Any such heuristic will occasionally return a confident wrong answer. Semantic match is Sonnet's job (Tier 3 in `citation-toolkit`'s match ladder) — do not re-introduce lexical scoring here. The script's role is to *filter* (slice the right page span; extract the right anchors); the *judgment* of which sentence carries the rule belongs to the semantic step.
 
 ---
 
 ## Stage 3 — Proposition Localization (per hop)
 
-On entering any hop, the current opinion text has already been fetched (at the end of the previous iteration, or at Stage 2 for the seed). Use:
+On entering any hop, the current opinion text has already been fetched (at the end of the previous iteration, or at Stage 2 for the seed). Use `html_with_citations` as the primary field for both matching and citation-anchor extraction; fall back to `plain_text` only when HTML is empty. `xml_harvard` may be requested as an additional pagination source if available.
 
-- `plain_text` for searching and semantic matching
-- `xml_harvard` for star-pagination (`label="[PAGE]"` markers) to resolve the matched passage to a pincite page
-- `html_with_citations` for the citation-anchor work in Stage 4
+**Apply `citation-toolkit`'s match ladder** to localize the proposition in the current opinion:
 
-Match the proposition to a passage in the opinion, in this order of preference:
+- When `pagination_mode == "reporter"` and the hop has a known pincite page: Tier 1 (direct phrase match) first, then Tier 3 (pincite-page semantic match via `chain_hop.py page`).
+- When `pagination_mode` is `"slip_only"` or `"none"`: skip Tier 3 (no reliable pincite page); go straight to Tier 4 (whole-opinion semantic search). Flag the hop with `non_reporter_pagination_detected` or `pincite_page_unresolvable`.
+
+Within whichever tier applies, the proposition can match in one of three drift-annotation modes:
 
 1. **Exact or near-exact quote.** If the proposition appears verbatim or with minor punctuation/formatting differences, anchor there. High-confidence match; `drift_annotation = null`.
 2. **Semantic paraphrase.** A passage expressing the same rule in different wording. Record the passage verbatim; `drift_annotation = "rephrases: <one-line note on how wording differs>"`.
@@ -113,7 +125,7 @@ For the seed (Hop 0), a "no match" outcome is treated specially: abort the whole
 
 For non-seed hops, a "no match" is a clean natural termination, not an error.
 
-Record the matched passage (typically 100–300 words of surrounding context) and the resolved pincite page on the current hop.
+Record the matched passage (typically 100–300 words of surrounding context), the resolved pincite page (or `null` if pagination_mode prevented page resolution), and the `match_tier_used` on the current hop.
 
 ---
 
@@ -309,7 +321,7 @@ After assembling the output, a single summary-level critic subagent may be dispa
 | Seed is a foreign / EU case | Out of scope for PoC — CourtListener is US-focused |
 | Proposition is a whole paragraph | Ask user to narrow to a specific sentence |
 | Proposition is a single word or phrase (e.g., "strict scrutiny") | Warn that short propositions fan out hard; suggest adding specificity |
-| Opinion text is OCR'd and garbled | Attempt match on `plain_text` anyway, flag the hop with `low_confidence_ocr`, continue |
+| Opinion text is OCR'd and garbled | Attempt match on the primary field (`html_with_citations` stripped, or `plain_text`) anyway, flag the hop with `low_confidence_ocr`, continue |
 | Opinion cites a predecessor by short form only (e.g., "See *id.*") | Use `citation-toolkit`'s short-form resolution against the opinion's internal citation stack; flag `resolved_via_short_form` on that hop |
 | Multiple pincites in seed citation (`576 U.S. 155, 163, 170`) | Ask user which pincite is the intended one at intake |
 | User's proposition appears multiple times in the same opinion at different pincites | Prefer the passage with the clearest outbound citation; flag `multiple_proposition_locations` and note which pincite was used |
@@ -328,7 +340,7 @@ Philosophy (inherited from cite-checking): **escalate, don't fail.** Every failu
 | Cluster found but identity check fails | Treat as no-match, fall through escalation |
 | Proposition cannot be located in the seed opinion | Abort with `proposition_not_in_seed`; explain and suggest the user double-check citation and/or wording |
 | Proposition cannot be located in a non-seed opinion | Terminal hop with `proposition_not_found_in_opinion` — natural termination, not an error |
-| Opinion fetch returns empty `plain_text` and empty `xml_harvard` | Try `html_with_citations` with tags stripped; if still empty, terminal with `courtlistener_missing` |
+| Opinion fetch returns empty `html_with_citations` AND empty `plain_text` | If `xml_harvard` is populated, derive text from it; otherwise terminal with `courtlistener_missing` |
 | CourtListener rate limit (HTTP 429) | Pause, show message, ask user to wait or retry. Respect `Retry-After` header if present. Interactive pause, not terminal |
 | Network error mid-traversal | Retry once after 5s; if still failing, emit the partial chain with `terminal_reason: "network_error"` |
 | User interrupts at checkpoint | Terminal `user_stopped_at_checkpoint`, chain fully written out through the last completed hop |

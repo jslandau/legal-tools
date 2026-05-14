@@ -2,6 +2,8 @@
 
 A Claude Code plugin with three skills for legal document work: extracting a Table of Authorities, verifying citations, and tracing a citation's lineage.
 
+US case-law lookups go through the [claude.ai CourtListener MCP server](https://www.courtlistener.com/help/api/) when it's available (no token required, batched citation verification via eyecite + citation-lookup in one call), with a scripted REST-API fallback for environments without the MCP.
+
 ## Skills
 
 ### `table-of-authorities`
@@ -56,7 +58,12 @@ Then install the plugin, either via the /plugin TUI or via the following command
 
 ## Requirements
 
-- **CourtListener API token** — required for US case lookups in `cite-checking` and `chain-cite`. Free tokens at [courtlistener.com/sign-in](https://www.courtlistener.com/sign-in/).
+US case-law lookups require access to CourtListener. Two paths, in order of preference:
+
+- **CourtListener MCP server (preferred)** — when the `claude.ai CourtListener` MCP server is installed and connected, no token is needed. The skills use `analyze_citations`, `get_endpoint_item`, and related MCP tools directly. Auth and rate limiting are handled by the MCP. This path also batches eyecite extraction with citation-lookup in one call, which is materially faster on documents with many citations.
+- **CourtListener REST API (fallback)** — when the MCP is not available, a free CourtListener API token is required for `cite-checking` and `chain-cite`. Get one at [courtlistener.com/sign-in](https://www.courtlistener.com/sign-in/). The skills will ask for the token at the start of a run when they detect the MCP is absent.
+
+`table-of-authorities` does not require either path — it uses local citation extraction (eyecite via the MCP's `extract_citations` tool when available, the skill's own parser otherwise) and does not need to verify citations against CourtListener.
 
 ## Supported document formats
 

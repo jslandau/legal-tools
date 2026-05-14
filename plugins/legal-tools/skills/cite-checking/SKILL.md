@@ -27,7 +27,7 @@ Ask the user:
 1. **What is the document?** (file path or paste content)
 2. **What format is it in?** PDF, plain text/Markdown, DOCX, or Word with tracked changes
 3. **Where should the output report be saved?** (suggest: same directory as the document, named `<original-filename>-cite-check.md`)
-4. **Do you have a CourtListener API token?** Required for US case lookups. If yes, note it for use in Stage 4. Free tokens are available at courtlistener.com/sign-in/.
+4. **CourtListener access.** If the `claude.ai CourtListener` MCP server is available, no token is needed — Stage 4 uses the MCP directly. Otherwise, ask for a CourtListener API token (free at courtlistener.com/sign-in/) and note it for the scripted-fallback path in Stage 4.
 
 ## Supported Formats
 
@@ -77,6 +77,8 @@ Read the document. Identify the substantive pages to process:
 
 Scan page by page through the substantive content. Maintain a **citation stack** as you go (needed for short-form resolution).
 
+**Accelerator (MCP path):** When the CourtListener MCP is available, you can bootstrap extraction by calling `mcp__claude_ai_CourtListener__extract_citations(text=<page or section text>, resolve=true)`. This runs eyecite locally (no API calls, no rate limit) and returns parsed citations with `Id.`/`supra`/short cites already resolved to their antecedents. Use its output as a starting point, then walk the document yourself to capture the **proposition** for each citation (the MCP returns the citation strings, not the asserted-clause context) and to catch citation types eyecite misses (administrative decisions, EU/international cases, informal popular-name references).
+
 For each citation found, extract two things:
 
 **A. The citation itself** — identify the citation type and capture the full text. Use the **Citation Taxonomy** and **Short Forms** sections of `citation-toolkit` to recognize the type (cases, constitutional, statutes, rules and regulations, legislative materials, secondary sources, short forms) and follow its guidance on informal references and short-form resolution against the running citation stack.
@@ -103,7 +105,13 @@ For each resolved citation, attempt to locate the full source text using the pri
 
 ### Lookup Lists by Citation Type
 
-**Cases (US):** Use the **CourtListener API** section of `citation-toolkit` — Step 1 (citation-lookup), Step 2 (opinion fetch), identity verification, and the full escalation chain (CourtListener → Justia → direct court sites → Google Scholar → ask user → mark `unverifiable`) live there. For pincite extraction (Stage 5 below), `plain_text` is used for searching and `xml_harvard` for star-pagination markers.
+**Cases (US):** Use the **CourtListener API** section of `citation-toolkit` — MCP path preferred. Stage 1 of that section (citation resolution) maps to `analyze_citations` when the MCP is available, which batches eyecite extraction with the citation-lookup API in one call; Stage 2 (opinion fetch) maps to `get_endpoint_item("opinions", id, fields=[...])`. If the MCP is unavailable, fall back to the curl-based Step 1/Step 2 documented in the same section. Identity verification and the full escalation chain (CourtListener → Justia → direct court sites → Google Scholar → ask user → mark `unverifiable`) live in citation-toolkit and apply to both paths.
+
+**Opinion fetch.** Default to `fields=["id", "html_with_citations", "plain_text"]`. Prefer `html_with_citations` (consolidated text with star-pagination markers and inline citation anchors); fall back to `plain_text` only when HTML is empty. Sub-opinion selection within a cluster follows `citation-toolkit`'s "Choosing the right sub-opinion" rule: prefer `020lead` unless the brief explicitly cites a dissent or concurrence.
+
+**Upfront pagination check.** Immediately after fetching each opinion, run `citation-toolkit`'s pagination-mode detection (single regex pass over `html_with_citations`) and record `pagination_mode` as one of `"reporter"`, `"slip_only"`, or `"none"`. This determines which match-ladder tier Stage 5 starts at and is consumed by Stage 6's confidence assessment.
+
+**Batching tip:** For documents with many citations, call `analyze_citations(text=<whole brief>)` once at the start of Stage 4 — eyecite extracts every unique case citation and verifies them all against CourtListener in one call (paginated via `resume_citation_analysis` for >250 unique cites). Then iterate through the result, fetching only opinion texts whose pincite content you actually need for Stage 5.
 
 **Cases (EU / international):**
 1. EUR-Lex (eur-lex.europa.eu) — Court of Justice of the EU; search by ECLI or case name
@@ -162,16 +170,33 @@ If identity cannot be confirmed, treat as unverifiable and escalate.
 
 Once the source is located and identity confirmed, retrieve the text at the pincite.
 
-- **For cases:** Navigate to the pincite page. Extract the relevant paragraph(s) — enough context to understand the holding or proposition being stated (typically 100–300 words surrounding the pincite).
-- **For statutes and regulations:** Retrieve the text of the cited section/subsection in full.
-- **For federal rules:** Retrieve the text of the cited rule and subsection in full.
-- **For secondary sources:** Navigate to the pincite page. Extract the relevant passage.
-- **For constitutional provisions:** Use the standard text of the cited provision.
-- **For legislative materials:** Retrieve the relevant passage from the Congressional Record, report, or hearing transcript.
+### Cases
+
+Apply the **match ladder for pincite extraction** defined in `citation-toolkit` (four tiers: direct phrase match → parenthetical semantic match → pincite-page semantic match → whole-opinion semantic search). Start at Tier 1 and fall through until you get a confident match. Record `match_tier_used: <1|2|3|4>` on the citation entry — Stage 6 reads this to set confidence.
+
+The starting tier depends on what the brief actually contains, not on the pincite alone:
+
+- Brief contains a direct quote from the source → start at Tier 1.
+- Brief uses an explanatory parenthetical (`(holding X)`, `(reasoning X)`, `(noting X)`, etc.) → if Tier 1 doesn't apply, start at Tier 2.
+- Brief is a bare cite (with or without `See` / `Cf.` / `see also` etc.) → start at Tier 3 if `pagination_mode == "reporter"`; otherwise Tier 4.
+
+When pagination_mode is `"slip_only"` or `"none"` (from the upfront check in Stage 4), Tier 3 is skipped — there is no reliable pincite page to slice. Go to Tier 4 (whole-opinion semantic search) and flag the entry with the appropriate pagination flag (`non_reporter_pagination_detected` or `pincite_page_unresolvable`).
+
+Extract enough context to understand the proposition being stated (typically 100–300 words surrounding the matched passage).
+
+### Other source types
+
+- **Statutes and regulations:** Retrieve the text of the cited section/subsection in full.
+- **Federal rules:** Retrieve the text of the cited rule and subsection in full.
+- **Secondary sources:** Navigate to the pincite page. Extract the relevant passage.
+- **Constitutional provisions:** Use the standard text of the cited provision.
+- **Legislative materials:** Retrieve the relevant passage from the Congressional Record, report, or hearing transcript.
+
+### Multiple pincites and failure handling
 
 **Multiple pincites** (e.g., `576 U.S. 155, 163, 170`): retrieve all pincite locations and treat them as a combined passage for analysis.
 
-**If pincite text cannot be retrieved** (e.g., source is located but the specific page is behind a paywall or unavailable): note what was found, mark pincite extraction as failed, and set support quality to `unable_to_assess`.
+**If pincite text cannot be retrieved** (Tier 4 returns no confident match, or source is located but the specific page is behind a paywall): note what was found, mark pincite extraction as failed, and set support quality to `unable_to_assess`.
 
 ---
 
@@ -196,6 +221,19 @@ Assign one of these labels:
 | **Unable to assess** | Source was not located, pincite text could not be retrieved, or the cited passage is inaccessible. |
 
 Write a 2–4 sentence explanation of why you assigned this label, quoting relevant language from the pincite text where possible.
+
+### Signal-Relativized Assessment
+
+Apply the **signal-relativized support assessment** table from `citation-toolkit` when picking the label. A `Cf.` cite that supports the proposition by analogy is Strong, not Adequate — the inferential gap is the intended mode of citation. A `But see` cite whose source straightforwardly contradicts the proposition is Strong, not Misleading. Always record the citation's signal alongside the proposition, and reference the signal in the explanation when it materially affects the label.
+
+### Confidence Adjustment from Match Tier
+
+The match tier recorded by Stage 5 informs how confidently the label can be assigned:
+
+- **Tier 1 (direct phrase match):** full confidence — quote and pincite agree.
+- **Tier 2 (parenthetical semantic match):** high confidence — the briefing author committed to a specific characterization; assess against that characterization.
+- **Tier 3 (pincite-page semantic match):** medium confidence — the matched passage may be one of several candidates on the cited page. If the second-best candidate is meaningfully different from the chosen one, note in the explanation.
+- **Tier 4 (whole-opinion semantic search):** lower confidence — the pincite page was not reliably localized. State this explicitly in the explanation (e.g., "Pincite page could not be localized due to slip-opinion pagination; the matched passage was located by whole-opinion semantic search."). Consider downgrading from Strong to Adequate when the only reason for Strong would be a Tier-4 match.
 
 ### Indirect and Oblique Cites
 
@@ -262,7 +300,7 @@ Explanation: [explanation]
 
 **If the critic partially agrees:** also flag the entry as `⚠ CRITIC DISAGREES` and include both analyses — partial disagreement is still disagreement worth surfacing.
 
-**If the critic names a specific case or source as better authority:** you must verify that suggestion before including it in the report. Run the named case through the Stage 4 CourtListener citation-lookup API and fetch the opinion. Confirm that the opinion actually addresses the proposition at issue. If it does, extract the relevant passage (using the same pincite-extraction approach as Stage 5) and include both the citation and the quoted passage in the report so the user can evaluate the suggestion concretely. If the case cannot be found, or if reading the opinion shows it does not address the proposition, omit the suggestion from the report entirely and note: `⚠ Critic suggested [citation] as better authority — could not be verified; omitted.` Do not include any unverified case citation suggested by the critic.
+**If the critic names a specific case or source as better authority:** you must verify that suggestion before including it in the report. Run the named case through Stage 4's case-lookup path (MCP `analyze_citations` or, as fallback, the citation-lookup REST endpoint) and fetch the opinion. Confirm that the opinion actually addresses the proposition at issue. If it does, extract the relevant passage (using the same pincite-extraction approach as Stage 5) and include both the citation and the quoted passage in the report so the user can evaluate the suggestion concretely. If the case cannot be found, or if reading the opinion shows it does not address the proposition, omit the suggestion from the report entirely and note: `⚠ Critic suggested [citation] as better authority — could not be verified; omitted.` Do not include any unverified case citation suggested by the critic.
 
 ---
 

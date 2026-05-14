@@ -19,7 +19,7 @@ This is a **reference skill**, not a workflow. It does not run end-to-end on its
 
 Consuming skills (e.g., `cite-checking`, `chain-cite`, `table-of-authorities`) include a "Prerequisites" section referencing this skill and use the vocabulary and patterns defined here without restating them.
 
-When a consuming skill needs the user's CourtListener token, the consuming skill collects it (typically in its own "Before Starting" questionnaire) and passes it through to the API calls described below.
+**CourtListener access: MCP-first.** When the `claude.ai CourtListener` MCP server is available, prefer its tools (auth and rate limiting are handled by the MCP — consuming skills do not need to collect a token from the user). Fall back to the scripted REST API (with a user-supplied bearer token) only when the MCP is unavailable. Both paths are documented below.
 
 ---
 
@@ -208,11 +208,125 @@ Consuming skills may define their own additional flags for workflow-specific sit
 
 ## CourtListener API
 
-Primary source for US case law. Free public tokens are available at courtlistener.com/sign-in/ (authenticated: 5,000 req/hour; unauthenticated: ~100/day). Consuming skills collect the token from the user before calling these endpoints.
+Primary source for US case law. Two access paths are supported; **prefer the MCP** when it is available.
 
-Do NOT attempt to scrape `courtlistener.com` pages — they are JavaScript-rendered and will return empty content. Use the REST API.
+Do NOT attempt to scrape `courtlistener.com` pages — they are JavaScript-rendered and will return empty content. Use the MCP tools (or, as fallback, the REST API).
 
-### Auth
+### MCP tool cheat-sheet (preferred path)
+
+When the `claude.ai CourtListener` MCP server is loaded, use these tools instead of curl. Auth is handled by the MCP — consuming skills do **not** need to collect a token from the user when going through the MCP.
+
+| Task | MCP tool | Notes |
+|------|----------|-------|
+| Parse citations from text (local, no API) | `mcp__claude_ai_CourtListener__extract_citations` | Runs eyecite locally; resolves `Id.`/`supra`/short cites if `resolve=true`. No rate limit. Use this whenever you only need the citation strings (e.g., TOA scanning). |
+| Verify a batch of citations against CourtListener | `mcp__claude_ai_CourtListener__analyze_citations` | Extracts citations from text **and** verifies each unique case citation against the citation-lookup API in one call. Returns case name, date, cite count, verification status, opinion IDs. Replaces Step 1 (citation-lookup) for nearly all use cases. For >250 unique cites, returns a `job_id` — resume with `resume_citation_analysis`. |
+| Resume a long verification job | `mcp__claude_ai_CourtListener__resume_citation_analysis` | Use after `analyze_citations` returns pending citations. `wait=true` sleeps through a short rate-limit window automatically. |
+| Look up a specific opinion by ID | `mcp__claude_ai_CourtListener__get_endpoint_item` with `endpoint_id="opinions"` | Replaces Step 2 (opinion fetch). **Always pass `fields=[...]`** — opinion text fields are huge. Useful field allowlists below. |
+| Look up an opinion cluster (parallel cites, sub-opinions, case metadata) | `get_endpoint_item` with `endpoint_id="clusters"` | When `analyze_citations` returns a `cluster_id` and you need its sub-opinions list, court, date, or canonical case name. |
+| Free-text or fielded search | `mcp__claude_ai_CourtListener__search` | Use when the user has a case name but no cite, or to disambiguate between clusters. Pass `type="o"` for opinions, `"d"` for dockets, `"p"` for judges, `"oa"` for oral argument. Always pass `fields=[...]`. |
+| Discover an endpoint's schema | `mcp__claude_ai_CourtListener__get_endpoint_schema` | When you need a field that's not on the search index — e.g., the full `opinions-cited` graph, party/attorney detail, financial disclosures. |
+| Call any non-search endpoint | `mcp__claude_ai_CourtListener__call_endpoint` | For docket entries, recap-documents, opinions-cited, courts, parties, attorneys, etc. Pass `fields=[...]`. |
+| Paginate prior results | `mcp__claude_ai_CourtListener__get_more_results` | Continue a `search` or `call_endpoint` query without re-issuing the filters. |
+| Enumerate field choices | `mcp__claude_ai_CourtListener__get_choices` | When a schema says "use get_choices" (e.g., the 470 valid `court` values). |
+
+#### Field allowlists for opinion fetches
+
+Opinion text fields are enormous. **Always restrict `fields`**.
+
+**Default to `html_with_citations` as primary across all skills**, with `plain_text` as a backup. `html_with_citations` is CourtListener's consolidated field — it includes the star-pagination markers AND the inline citation anchors AND the consolidated text, in one payload. `plain_text` is sometimes empty (especially for older or Harvard-CAP-only ingests), and when it is populated it does not always carry the same pagination scheme as `html_with_citations`. Request `html_with_citations` first; fall back to `plain_text` only when the HTML field is empty.
+
+- **For proposition/pincite text searching (`cite-checking` Stage 5):** `["id", "html_with_citations", "plain_text"]`. Use `html_with_citations` after stripping tags; fall back to `plain_text` only if HTML is empty.
+- **For star-pagination / pincite page extraction (`chain-cite` Stage 3):** `["id", "html_with_citations"]`. Optionally also request `"xml_harvard"` if you anticipate ingestion-format-specific edge cases.
+- **For citation-graph traversal (`chain-cite` Stage 4):** `["id", "html_with_citations"]`. The anchors `<span class="citation" data-id="..."><a href="/opinion/{id}/...">` are what backward traversal walks.
+- **For identity verification only (case name + date + reporter):** fetch the cluster instead — `get_endpoint_item("clusters", id, fields=["id", "case_name", "date_filed", "citations", "sub_opinions"])`.
+
+#### Choosing the right sub-opinion within a cluster
+
+A cluster's `sub_opinions` array may contain one or several opinion records. When there are several, use the `type` field to pick the right one:
+
+| `type` | What it is | When to pick |
+|---|---|---|
+| `010combined` | Single combined opinion (majority + concurrences + dissents in one record) | When it's the only entry, or when reporter pagination is absent in the split-out records. Often a slip-format ingest. |
+| `020lead` | The majority / lead opinion, split out from concurrences and dissents | **Prefer this when present** — typically the Harvard-CAP ingest with reporter pagination (`*N` markers). |
+| `030concurrence`, `040dissent` | Separate concurring or dissenting opinions | Only pick when the brief specifically cites a dissent or concurrence. |
+
+Rule of thumb: if the brief's citation does not flag a dissent or concurrence (no `(dissenting)`, `(concurring)`, `(per curiam)` notation), prefer `020lead` if present, otherwise `010combined`. When you pick a non-lead opinion deliberately, record that choice — Stage 6 support assessment depends on whether the cited passage is in the controlling opinion or a separate writing.
+
+#### Upfront pagination-mode detection
+
+Before doing any pincite extraction, run a one-shot check on the chosen opinion's `html_with_citations` and record a `pagination_mode` for downstream Stages 5/6 to consume. This is fast (single regex pass over the HTML) and prevents a class of late-stage failures where the matched passage lands on the wrong page scheme.
+
+The detection algorithm:
+
+1. From `analyze_citations` (or the cluster's `citations` array), note the **reporter** the brief used (e.g., `F.3d`, `U.S.`, `S. Ct.`) and the **starting page** of the cited case.
+2. Scan `html_with_citations` for star-pagination markers using this combined pattern (covers known conventions): `\*(\d+)\b | label="(\d+)" | page-label="(\d+)" | \f(\d+)`. The last alternative — form-feed + number — catches slip-opinion pagination from court-direct ingests (e.g., SCOTUS slips, Ninth Circuit en banc PDFs).
+3. Compare the marker number range to the cited starting page:
+   - **Markers exist AND the cited pincite page falls inside the marker range** (start ≤ pincite ≤ end) → `pagination_mode: "reporter"`. Use page-based pincite extraction.
+   - **Markers exist BUT the cited pincite page is far outside the marker range** (typical slip pagination starts at `*1` and runs into the low thousands; reporter pagination for a circuit case might be `*854`–`*870`) → `pagination_mode: "slip_only"`. The opinion text is paginated by a *different* scheme than the brief uses. Page-based extraction will fail; route to phrase/semantic matching. Flag `non_reporter_pagination_detected`.
+   - **No markers at all** → `pagination_mode: "none"`. Route to phrase/semantic matching. Flag `pincite_page_unresolvable`.
+
+When `pagination_mode != "reporter"`, surface the mismatch in Stage 6's confidence assessment — it explains the inherent uncertainty in pincite localization.
+
+#### Match ladder for pincite extraction
+
+Stage 5 (in `cite-checking`) and Stage 3 (in `chain-cite`) both need to localize the brief's proposition inside the cited opinion. Use this four-tier ladder, fast to slow, with the tier and outcome recorded for Stage 6:
+
+| Tier | When applicable | How | Tier confidence |
+|---|---|---|---|
+| **1. Direct phrase match** | Brief contains a directly quoted passage from the source | String-search the quoted text (or a 6–10 word distinctive substring) across the opinion text. If pagination_mode is "reporter", verify the hit lies within ±1 page of the cited pincite. | High |
+| **2. Parenthetical semantic match** | Brief uses an explanatory parenthetical: `(holding X)`, `(reasoning X)`, `(noting X)`, `(explaining X)`, etc. | Sonnet-tier semantic match: dispatch the parenthetical's content against the opinion text, preferring the pincite page when pagination_mode is "reporter". The parenthetical is a soft quote — the briefing author has committed to a characterization. | High–Medium |
+| **3. Pincite-page semantic match** | pagination_mode is "reporter", but the brief has neither a direct quote nor an explanatory parenthetical (e.g., a bare `See` cite with no parenthetical) | Slice the opinion to the pincite page; Sonnet-tier semantic match between the brief's proposition (in its surrounding context) and the sentences on that page. | Medium |
+| **4. Whole-opinion semantic search** | pagination_mode is "slip_only" or "none", OR Tier 3 returned no confident match | Sonnet-tier semantic match across the whole opinion text. If no passage scores above a confidence threshold, flag `pincite_page_unresolvable` and ask the user to point at the intended passage. | Low — surface to user |
+
+Always start at Tier 1 and fall through. A successful Tier 1 hit short-circuits the more expensive tiers. When falling through, record `match_tier_used: <1|2|3|4>` on the citation entry for Stage 6 to consume.
+
+#### Signal-relativized support assessment
+
+The Bluebook signal (`See`, `Cf.`, `But see`, `See generally`, etc.) tells you what the brief *claims* about the cited source. Stage 6 (or any equivalent support-quality stage) must evaluate the support label relative to the signal, not against a strict "this passage states this proposition verbatim" bar:
+
+| Signal | What the brief claims | Stage 6 evaluation bar |
+|---|---|---|
+| (no signal) | Source directly states the proposition | Standard bar: Strong if verbatim or near-verbatim; lower as the inferential gap widens. |
+| `See` | Source supports the proposition, by implication or short inference | Standard bar — but a one-step inference is fully consistent with Strong. |
+| `See, e.g.,` | Source is one example of authorities supporting the proposition | Standard bar, applied to *this* source only; don't ding the cite for not being the only authority. |
+| `Cf.` | Source supports the proposition by analogy | Lower bar: an analogous holding is Adequate; a strict-on-point holding would also be Strong. The inferential gap is the *intended* mode of citation. |
+| `But see`, `Contra` | Source *contradicts* the proposition | Inverted bar: "Strong" means strongly contradicts; "Misleading" means the cite is mislabeled (the source actually supports, or is on a different point). |
+| `See generally` | Background or related authority | Loose bar: support is sufficient if the source is genuinely on the topic, even without supporting the specific proposition. Flag `Misleading` only if the cite is materially off-topic. |
+| `Compare X, with Y` | Reader should compare the two; neither cite supports a single proposition standalone | Evaluate each side for whether it accurately represents what the cite says; the proposition is the *comparison*, not a single rule. |
+
+When a citation uses a signal not listed here (e.g., `accord`, `see also`), default to the standard bar but note the signal in the explanation. Always record the signal alongside the proposition so Stage 6 has the necessary context.
+
+#### Step 1 (MCP) — Resolve a citation to an opinion
+
+For a single ad-hoc citation, the simplest call is:
+
+```
+analyze_citations(text="<the cite as it appears, with surrounding context if available>")
+```
+
+For batches of citations already in a document, pass the document text — eyecite extracts and dedupes for you. For >250 unique citations, capture the returned `job_id` and call `resume_citation_analysis(job_id=...)` (with `wait=true` if rate-limited).
+
+#### Step 2 (MCP) — Fetch the opinion text
+
+Once you have an `opinion_id` from Step 1:
+
+```
+get_endpoint_item(
+  endpoint_id="opinions",
+  item_id=<opinion_id>,
+  fields=["id", "html_with_citations", "plain_text"],   # html_with_citations primary; plain_text as fallback
+)
+```
+
+For downstream pincite-page slicing or anchor extraction, write the JSON to a temp file and operate on it locally — same downstream guidance as the scripted path:
+
+- `html_with_citations` — **primary** field. Outbound citations as anchor tags AND star-pagination markers AND consolidated text, all in one. Use this for both proposition matching (strip tags first) and citation-graph traversal.
+- `plain_text` — secondary fallback when `html_with_citations` is empty.
+- `xml_harvard` — additional pagination source (`label="[PAGE]"` attributes); often omitted on newer opinions. Only worth requesting alongside the others when you anticipate ingestion-format-specific edge cases.
+
+### REST API (scripted fallback)
+
+When the MCP is not available, use the REST API directly. Free public tokens are available at courtlistener.com/sign-in/ (authenticated: 5,000 req/hour; unauthenticated: ~100/day). The consuming skill collects the token from the user before calling these endpoints.
 
 All requests use a bearer-token header:
 
@@ -220,7 +334,7 @@ All requests use a bearer-token header:
 Authorization: Token [USER_TOKEN]
 ```
 
-### Step 1 — Resolve a citation to an opinion
+**Step 1 — Resolve a citation to an opinion**
 
 ```bash
 curl -s -X POST "https://www.courtlistener.com/api/rest/v4/citation-lookup/" \
@@ -230,7 +344,7 @@ curl -s -X POST "https://www.courtlistener.com/api/rest/v4/citation-lookup/" \
 
 Returns a `clusters` array. Identify the correct cluster by matching `case_name`, `date_filed`, and `citations`. Note the opinion ID from `sub_opinions`.
 
-### Step 2 — Fetch the opinion text
+**Step 2 — Fetch the opinion text**
 
 ```bash
 curl -s "https://www.courtlistener.com/api/rest/v4/opinions/[OPINION_ID]/" \
@@ -238,24 +352,22 @@ curl -s "https://www.courtlistener.com/api/rest/v4/opinions/[OPINION_ID]/" \
   -o /tmp/opinion-[CASE-SLUG].json
 ```
 
-Work from the local file for all subsequent pincite extraction and citation-graph traversal.
-
-- Use `plain_text` for searching and semantic matching of propositions.
-- Use `xml_harvard` for star-pagination markers (format: `label="[PAGE]"`) when you need to locate a specific pincite page within the opinion.
-- Use `html_with_citations` when you need the opinion's **outbound citations** marked up in context — every citation is wrapped in an anchor tag, which makes it possible to correlate a cited authority with the passage that cites it. This is the field `chain-cite` relies on for backward traversal.
+Work from the local file for all subsequent pincite extraction and citation-graph traversal. Field semantics (`plain_text`, `xml_harvard`, `html_with_citations`) are identical to the MCP path documented above.
 
 ### Identity verification
 
-Once an opinion is fetched, confirm it's the right one before using it:
+Once an opinion is fetched (by either path), confirm it's the right one before using it:
 
 - Confirm the reporter volume, reporter abbreviation, starting page, and party names match the input citation.
 - If the fetched opinion has a different starting page, it is a different case — do not use it; treat the lookup as failed and fall through to the next source.
+
+When using `analyze_citations`, the MCP performs a case-name cross-check automatically and emits a WARNING for likely hallucinated citations (verified by reporter but case name diverges). Treat that warning as failure-of-identity for the purpose of the escalation chain below.
 
 ### Escalation chain for US cases
 
 If CourtListener fails (no cluster, wrong cluster after verification, or opinion text unavailable), fall through in this order:
 
-1. **CourtListener** (primary — as above)
+1. **CourtListener** (primary — MCP if available, REST API otherwise)
 2. **Justia** (law.justia.com) — fallback if CourtListener lacks the opinion text
 3. **Direct court websites** — SCOTUS (supremecourt.gov), circuit courts
 4. **Google Scholar** — last resort; scraping is unreliable and may be blocked
@@ -283,7 +395,7 @@ Use Haiku (`claude-haiku-4-5-20251001`) for tasks that are deterministic or near
 - **Citation parsing into the structured component schemas** above (splitting `547 U.S. at 391` into volume/reporter/page; identifying `Fed. R. Civ. P. 56(a)` as rule_set + rule_number + subsection).
 - **Short-form resolution against a running citation stack** when the candidate set is small and the match is unambiguous (exact party-name match, exact reporter-volume-page match, unambiguous `Id.`). Escalate to Sonnet only when the toolkit's `unresolved_short_form` flag is about to be raised.
 - **Star-pagination / pincite offset lookup** in `xml_harvard` or `html_with_citations` (locating `label="[PAGE]"` or `star-pagination">*[PAGE]`).
-- **Exact-quote proposition localization** in `plain_text` (string search for the quoted passage).
+- **Exact-quote proposition localization** in `html_with_citations` after tag stripping (string search for the quoted passage; Match Ladder Tier 1).
 - **Applying the flag vocabulary** once the judgment has been made — assigning an already-chosen flag name to an entry.
 - **Category assignment** for the TOA's 7-category ordering when the citation_type is already known.
 

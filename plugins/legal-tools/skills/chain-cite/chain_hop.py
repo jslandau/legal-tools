@@ -4,41 +4,39 @@ chain_hop.py — mechanical helper for chain-cite.
 
 Two subcommands reflect the skill's Haiku vs. Sonnet split:
 
-  page     Fetch an opinion from CourtListener (cached at /tmp/opinion-<id>.json),
-           extract the pincite page's full text, and return it along with a list
-           of sentence-level chunks. The caller (a Sonnet subagent) then picks
-           which sentence carries the proposition being traced — a semantic
-           judgment, not a lexical one. This subcommand does NO scoring: semantic
-           relevance is not something regex can decide.
+  page     Given an opinion JSON file on disk, extract the pincite page's full
+           text and return it along with a list of sentence-level chunks. The
+           caller (a Sonnet subagent) then picks which sentence carries the
+           proposition being traced — a semantic judgment, not a lexical one.
+           This subcommand does NO scoring: semantic relevance is not something
+           regex can decide.
 
-  anchors  Given an opinion id and a character offset into its html_with_citations
-           field (the offset of the passage the Sonnet step picked), return the
-           outbound citation anchors found in or immediately after that passage's
-           sentence. Mechanical regex work — Haiku-tier.
+  anchors  Given an opinion JSON file and a chosen sentence from its
+           html_with_citations field, return the outbound citation anchors found
+           in or immediately after that sentence. Mechanical regex work —
+           Haiku-tier.
 
 Both subcommands emit JSON on stdout.
+
+The script no longer fetches from CourtListener. The skill is responsible for
+fetching the opinion via the CourtListener MCP (preferred) or REST API
+(fallback) and writing the JSON to a file, then passing the path here with
+``--opinion-json``. This keeps the script free of auth/network concerns and
+makes it trivially testable with stub fixtures.
 """
 import argparse
 import json
 import os
 import re
 import sys
-import urllib.request
 
 # ---------------------------------------------------------------------------
-# Fetch + cache
+# Load opinion JSON
 # ---------------------------------------------------------------------------
 
-def fetch(opinion_id, token):
-    path = f"/tmp/opinion-{opinion_id}.json"
-    if not os.path.exists(path):
-        req = urllib.request.Request(
-            f"https://www.courtlistener.com/api/rest/v4/opinions/{opinion_id}/",
-            headers={"Authorization": f"Token {token}"},
-        )
-        data = urllib.request.urlopen(req, timeout=30).read()
-        open(path, "wb").write(data)
-    return json.loads(open(path).read())
+def load_opinion(path):
+    with open(path) as f:
+        return json.load(f)
 
 
 def pick_text(op):
@@ -59,7 +57,19 @@ def strip_tags(s):
 # Page-span extraction
 # ---------------------------------------------------------------------------
 
-PAGE_MARKER_RE = re.compile(r'\*(\d+)\b|label="(\d+)"|page-label="(\d+)"')
+PAGE_MARKER_RE = re.compile(
+    # Known pagination conventions across CourtListener ingests:
+    #   *N                   — Harvard CAP star-pagination in html_with_citations / plain_text
+    #   label="N"            — xml_harvard star-pagination attributes
+    #   page-label="N"       — variant XML attribute form
+    #   \fN                  — form-feed followed by page number; slip-opinion pagination
+    #                          from court-direct ingests (SCOTUS slips, circuit en banc PDFs).
+    #                          NOTE: \f-paginated text often uses *slip* pagination, not the
+    #                          reporter (F.3d / U.S.) pagination the brief cites by. Use the
+    #                          `citation-toolkit` upfront pagination-mode detection to decide
+    #                          whether this opinion's markers correspond to the brief's cite.
+    r'\*(\d+)\b|label="(\d+)"|page-label="(\d+)"|\f(\d+)\b'
+)
 
 
 def find_page_span(text, pincite):
@@ -68,6 +78,11 @@ def find_page_span(text, pincite):
     Start = index of the page marker for this pincite; end = index of the next
     page marker (of any number) after it. No scoring — this is a filter, not a
     judgment about where on the page the relevant passage sits.
+
+    Tries each pagination convention in order. Returns (None, None) if no
+    convention finds the page; the caller (the skill, not this script) is
+    responsible for falling through to whole-opinion semantic search per the
+    match-ladder in citation-toolkit.
     """
     if pincite is None:
         return None, None
@@ -75,6 +90,7 @@ def find_page_span(text, pincite):
         fr"\*{pincite}\b",
         fr'label="{pincite}"',
         fr'page-label="{pincite}"',
+        fr"\f{pincite}\b",
     ]
     start = None
     for pat in patterns:
@@ -189,7 +205,8 @@ def classify_non_case_citation(text):
 # ---------------------------------------------------------------------------
 
 def cmd_page(args):
-    op = fetch(args.opinion_id, args.token)
+    op = load_opinion(args.opinion_json)
+    opinion_id = op.get("id")
     field, text = pick_text(op)
     if not text:
         print(json.dumps({"error": "no_text_fields_populated", "keys": list(op.keys())}))
@@ -199,7 +216,7 @@ def cmd_page(args):
     if page_start is None:
         # No page marker found — return the whole opinion plain text, caller can fall back
         out = {
-            "opinion_id": args.opinion_id,
+            "opinion_id": opinion_id,
             "field_used": field,
             "pincite": args.pincite,
             "page_marker_found": False,
@@ -218,7 +235,7 @@ def cmd_page(args):
     sentences = chunk_sentences(page_plain)
 
     out = {
-        "opinion_id": args.opinion_id,
+        "opinion_id": opinion_id,
         "field_used": field,
         "pincite": args.pincite,
         "page_marker_found": True,
@@ -244,7 +261,8 @@ def cmd_page(args):
 # ---------------------------------------------------------------------------
 
 def cmd_anchors(args):
-    op = fetch(args.opinion_id, args.token)
+    op = load_opinion(args.opinion_json)
+    opinion_id = op.get("id")
     field, text = pick_text(op)
     if field != "html_with_citations":
         print(json.dumps({
@@ -292,7 +310,7 @@ def cmd_anchors(args):
         usable.append(a)
 
     out = {
-        "opinion_id": args.opinion_id,
+        "opinion_id": opinion_id,
         "sentence_found_at": sentence_start,
         "sentence_end": m.end(),
         "scan_window_end": scan_end,
@@ -325,20 +343,21 @@ def main():
     p = argparse.ArgumentParser(description="chain-cite mechanical helper")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pp = sub.add_parser("page", help="Fetch opinion and extract pincite page text")
-    pp.add_argument("--opinion-id", type=int, required=True)
+    pp = sub.add_parser("page", help="Extract pincite page text from an opinion JSON file")
+    pp.add_argument("--opinion-json", required=True,
+                    help="Path to opinion JSON file (fetched by the skill via the CourtListener MCP or REST API). "
+                         "Must contain at least one of: html_with_citations, plain_text, html.")
     pp.add_argument("--pincite", type=int, default=None)
-    pp.add_argument("--token", required=True)
     pp.add_argument("--max-chars", type=int, default=30000,
                     help="Max chars to return when no page marker is found (whole-opinion fallback)")
     pp.set_defaults(func=cmd_page)
 
     pa = sub.add_parser("anchors", help="Extract outbound citation anchors after a chosen sentence")
-    pa.add_argument("--opinion-id", type=int, required=True)
+    pa.add_argument("--opinion-json", required=True,
+                    help="Path to opinion JSON file. Must contain html_with_citations.")
     pa.add_argument("--sentence", required=True,
                     help="The verbatim sentence/passage selected by the Sonnet step. "
                          "First ~80 chars are used as a tolerant needle against html_with_citations.")
-    pa.add_argument("--token", required=True)
     pa.add_argument("--visited", default="",
                     help="Comma-separated opinion IDs already in the chain (for cycle detection)")
     pa.add_argument("--forward-chars", type=int, default=1500,

@@ -1,7 +1,7 @@
 {
     "name": "legal-tools",
-    "version": "0.4.2",
-    "description": "Tools for legal document preparation: Table of Authorities extraction, citation verification (cite-checking), and shared citation toolkit",
+    "version": "0.5.0",
+    "description": "Tools for legal document preparation: Table of Authorities extraction, citation verification (cite-checking), citation lineage tracing (chain-cite), and shared citation-toolkit. CourtListener access via MCP (preferred) or REST API.",
     "author": {
         "name": "jsl",
         "email": "joshua.s.landau@gmail.com"
