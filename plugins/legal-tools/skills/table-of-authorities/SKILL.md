@@ -52,11 +52,17 @@ Work through the document page by page. For each page, extract every legal citat
 
 ### Step 1: Identify All Citations
 
-Scan for citations using the **Citation Taxonomy** and **Short Forms** sections of `citation-toolkit` (Cases, Constitutional Provisions, Statutes, Rules and Regulations, Legislative Materials, Secondary Sources, Short Forms). The toolkit covers Westlaw/LEXIS citations, informal references, popular-name statutes, grouped and informal rule references, state constitutional provisions, and all the parenthetical handling rules.
+Extraction follows the **two-pass workflow** in `citation-toolkit`'s "Extraction: eyecite is the primitive" section: eyecite extracts every recognized citation in one call, then a focused human pass adds the gap categories. Do NOT free-form scan the document — that is what eyecite is for.
 
-**Accelerator (MCP path):** When the CourtListener MCP is available, bootstrap extraction by calling `mcp__claude_ai_CourtListener__extract_citations(text=<page or section text>, resolve=true)` for each substantive page. This runs eyecite locally (no API calls, no rate limit) and returns parsed citations with `Id.`/`supra`/short cites already resolved — which short-circuits Step 2 below for the citations eyecite recognizes. After the bootstrap, walk the page yourself to catch what eyecite misses: administrative decisions (PTAB, FTC, SEC, FCC), state-constitutional provisions, EU/international cases, popular-name statutes ("the Lanham Act"), and informal references ("First Amendment"). Page tracking is the skill's responsibility — record the current page number with each citation as you scan.
+**Pass 1 — eyecite.** Use the MCP path when available: `mcp__claude_ai_CourtListener__extract_citations(text=<substantive text>, resolve=true)`. Otherwise use the local `eyecite_extract.py` script in `citation-toolkit/`. Either way, the output is a JSON array of citations in document order, with `Id.`/`supra`/short cites already resolved to their antecedents — Step 2 (Short Forms) is largely already done for you.
 
 Do NOT call `analyze_citations` for TOA work — it adds CourtListener verification on top of extraction, which is wasted effort for TOA (TOA only needs the citation strings and their pages, not their verification status).
+
+**Pass 2 — gap pass.** Walk the substantive content once, looking *only* for the gap categories listed in `citation-toolkit`: administrative decisions (PTAB, FTC, SEC, FCC), EU/international cases (ECLI, ECHR), state constitutional provisions, popular-name statutes ("the Lanham Act"), informal constitutional references ("First Amendment"), and statute subsection breakdowns. Add these to the Pass-1 array.
+
+**Page tracking is the skill's responsibility.** eyecite returns character-level span offsets, not page numbers. Build an offset→page map as you scan (whenever you cross a page boundary, note the offset); then for each entry in the Pass-1 array, look up its span start in the map to get the page. Pass-2 cites get the page where you find them. This is much more reliable than re-deriving page numbers from scratch and lets Step 3's aggregation work uniformly across both passes.
+
+The toolkit covers Westlaw/LEXIS citations, informal references, popular-name statutes, grouped and informal rule references, state constitutional provisions, and all the parenthetical handling rules.
 
 Two categorization refinements this skill adds on top of the toolkit's taxonomy:
 
@@ -80,7 +86,10 @@ In addition to the federal patterns covered in `citation-toolkit`, include state
 
 ### Step 2: Resolve Short Forms
 
-Follow the **Short Forms** rules in `citation-toolkit` (Id., party-name, reporter-only, supra/supra note, informal references), maintaining a citation stack as you read. Flag unresolved short forms with `unresolved_short_form` (from the shared flag vocabulary) rather than guessing.
+eyecite (Pass 1 of Step 1) already resolved `Id.`, `supra`, party-name, and reporter-only short forms for the citations it recognized — each short-form entry in the Pass-1 array has a `resolved_to` pointer to its antecedent. The remaining work in this step is:
+
+- **Pass-2 cites only:** maintain a citation stack across the gap-category cites and resolve any short forms among them by hand, following the **Short Forms** rules in `citation-toolkit` (Id., party-name, reporter-only, supra/supra note, informal references).
+- **eyecite short forms flagged `unresolved_short_form`:** try once more against the running stack (including Pass-2 cites). If still unresolved, leave the flag in place for user review — don't guess.
 
 Two ToA-specific caveats worth remembering:
 

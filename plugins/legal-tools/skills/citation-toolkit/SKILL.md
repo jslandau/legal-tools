@@ -23,6 +23,57 @@ Consuming skills (e.g., `cite-checking`, `chain-cite`, `table-of-authorities`) i
 
 ---
 
+## Extraction: eyecite is the primitive
+
+Every consuming skill in `legal-tools` starts with the same step — pull every citation out of a document. That step is **not** a free-form LLM scan. It runs [eyecite](https://github.com/freelawproject/eyecite), the Free Law Project's citation parser trained on 55M+ real citations. eyecite output is **authoritative** for the citation types it recognizes; the consuming-skill's manual pass exists only to fill known gaps (listed below), not to second-guess what eyecite already found.
+
+### Two access paths
+
+Either path produces the same toolkit-shaped JSON. Prefer the MCP when loaded; reach for the local script when running offline.
+
+| Path | How | When to use |
+|---|---|---|
+| **MCP (preferred)** | `mcp__claude_ai_CourtListener__extract_citations(text=<doc text>, resolve=true)` — runs eyecite server-side, returns parsed citations with `Id.`/`supra`/short cites already linked to antecedents. No API calls, no rate limit. | Whenever the `claude.ai CourtListener` MCP is available. |
+| **Local script** | `python3 eyecite_extract.py --input <file>` (or stdin) — see `eyecite_extract.py` in this skill's directory. Same eyecite under the hood; emits a JSON array on stdout. | MCP unavailable; offline runs; cases where the skill wants raw span offsets to drive page-tracking or annotation. Requires `pip install eyecite`. |
+
+### What eyecite recognizes
+
+eyecite returns structured records for these citation types (each shape maps onto the Structured Component Schemas below):
+
+| eyecite class | Toolkit `citation_type` | Notes |
+|---|---|---|
+| `FullCaseCitation` | `case` | `groups: {volume, reporter, page}`; `metadata: {plaintiff, defendant, court, year, pin_cite, parenthetical}`. |
+| `ShortCaseCitation` | `short_case` (links to a `case`) | `metadata.antecedent_guess` is the party name eyecite linked it to. |
+| `IdCitation` | `id` (links to the immediately-prior cite) | Carries `pin_cite` only — antecedent comes from `resolve_citations`. |
+| `SupraCitation` | `supra` (links to a prior `case`) | `metadata.antecedent_guess` plus pin cite. |
+| `FullLawCitation` | `statute` | `groups: {reporter (e.g. "U.S.C."), title/chapter, section, subdivision}`. **Soft spot:** subsections like `(c)(2)` are not always populated — verify against the source text and flag `ambiguous_section_reference` if missing. |
+| `FullJournalCitation` | `secondary` (law review) | `metadata: {author, title}`, `groups: {volume, reporter (journal), page}`. |
+| `UnknownCitation` | `unknown` | Matched the citation tokenizer but did not parse into any of the above. Surface for human review. |
+
+### Gap list — what eyecite does NOT catch
+
+After running eyecite, the consuming skill must walk the document for these. Don't try to make eyecite do them — patch around it.
+
+- **Administrative decisions:** PTAB (`IPR2020-00019`), FTC, SEC, FCC orders and opinions.
+- **EU / international cases:** ECLI identifiers, EUR-Lex case numbers, ECHR application numbers.
+- **Popular-name statutes:** "the Lanham Act", "ERISA", "Section 230" — bare references not in `[title] U.S.C. § [section]` form.
+- **Informal constitutional references:** "First Amendment", "Article III", "due process" — eyecite catches formal `U.S. Const. amend. I` but not narrative references.
+- **State constitutional provisions:** `[State] Const. art. [X], § [Y]` — sometimes caught, often not.
+- **Treatises and books** in non-standard forms; **legislative materials** other than `Cong. Rec.` / committee reports.
+- **Statute subsection extensions** (`(c)(2)`, `§§ 315(a), (d), and (e)`) — eyecite parses the section but may drop the subsection breakdown.
+
+### How to combine eyecite + the gap pass
+
+1. **Extract:** Run eyecite once over the substantive text (MCP `extract_citations` or local script). This produces a sorted, document-order list with short forms resolved.
+2. **Map onto the toolkit schemas.** The shapes above translate directly. The local script does this for you; if you're working from raw MCP output, map fields by hand using the table.
+3. **Walk for gaps.** Read the substantive text once, looking *only* for the gap categories. Don't re-extract what eyecite already found. When you find a gap-category citation, parse it manually into the appropriate schema.
+4. **Apply flags.** Unresolved short forms from eyecite → `unresolved_short_form`. Missing subsection on a statute → `ambiguous_section_reference`. Informal references resolved by the human pass → `informal_reference`.
+5. **Page/proposition tracking is still the skill's job.** eyecite gives you span offsets (character positions), not page numbers — the consuming skill maintains the offset→page map and the proposition for each citation.
+
+This split moves the deterministic work (parsing, short-form linking) out of the LLM and into eyecite, while reserving LLM judgment for the parts that genuinely need it (proposition extraction, gap-category recognition, support analysis).
+
+---
+
 ## Citation Taxonomy
 
 Identify citations of these types. The consuming skill decides what to do with each (e.g., look it up, extract a proposition, include in a TOA).
@@ -218,7 +269,7 @@ When the `claude.ai CourtListener` MCP server is loaded, use these tools instead
 
 | Task | MCP tool | Notes |
 |------|----------|-------|
-| Parse citations from text (local, no API) | `mcp__claude_ai_CourtListener__extract_citations` | Runs eyecite locally; resolves `Id.`/`supra`/short cites if `resolve=true`. No rate limit. Use this whenever you only need the citation strings (e.g., TOA scanning). |
+| Parse citations from text (local, no API) | `mcp__claude_ai_CourtListener__extract_citations` | Runs eyecite locally; resolves `Id.`/`supra`/short cites if `resolve=true`. No rate limit. **This is the primary extraction primitive** — see "Extraction: eyecite is the primitive" above for the eyecite-then-gap-pass workflow. |
 | Verify a batch of citations against CourtListener | `mcp__claude_ai_CourtListener__analyze_citations` | Extracts citations from text **and** verifies each unique case citation against the citation-lookup API in one call. Returns case name, date, cite count, verification status, and a **`Cluster ID`** for each verified case (NOT an opinion ID — see Step 2 below). Replaces Step 1 (citation-lookup) for nearly all use cases. For >250 unique cites, returns a `job_id` — resume with `resume_citation_analysis`. |
 | Resume a long verification job | `mcp__claude_ai_CourtListener__resume_citation_analysis` | Use after `analyze_citations` returns pending citations. `wait=true` sleeps through a short rate-limit window automatically. |
 | Look up a specific opinion by ID | `mcp__claude_ai_CourtListener__get_endpoint_item` with `endpoint_id="opinions"` | Replaces Step 2 (opinion fetch). **Always pass `fields=[...]`** — opinion text fields are huge. Useful field allowlists below. |

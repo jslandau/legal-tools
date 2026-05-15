@@ -75,25 +75,29 @@ Read the document. Identify the substantive pages to process:
 
 ## Stage 2 — Citation Extraction
 
-Scan page by page through the substantive content. Maintain a **citation stack** as you go (needed for short-form resolution).
+Extraction is a two-pass process: **eyecite first, then a focused human pass for the gap categories.** Do not LLM-scan the document for citations — that is what eyecite is for, and re-doing its work wastes tokens and introduces errors.
 
-**Accelerator (MCP path):** When the CourtListener MCP is available, you can bootstrap extraction by calling `mcp__claude_ai_CourtListener__extract_citations(text=<page or section text>, resolve=true)`. This runs eyecite locally (no API calls, no rate limit) and returns parsed citations with `Id.`/`supra`/short cites already resolved to their antecedents. Use its output as a starting point, then walk the document yourself to capture the **proposition** for each citation (the MCP returns the citation strings, not the asserted-clause context) and to catch citation types eyecite misses (administrative decisions, EU/international cases, informal popular-name references).
+**Pass 1 — eyecite (authoritative for recognized types).** Follow the **"Extraction: eyecite is the primitive"** section of `citation-toolkit`. Use the MCP path (`mcp__claude_ai_CourtListener__extract_citations(text=<substantive text>, resolve=true)`) when available; fall back to the local `eyecite_extract.py` script in `citation-toolkit/` otherwise. The output is a JSON array of citations in document order with `Id.`/`supra`/short cites already linked to their antecedents — that *is* your citation stack for Stage 3, no manual re-derivation needed.
 
-For each citation found, extract two things:
+**Pass 2 — gap pass.** Walk the substantive text once looking *only* for the gap categories listed in `citation-toolkit` (administrative decisions, EU/international cases, popular-name statutes, informal constitutional references, state constitutional provisions, statute subsection breakdowns). Add these to the array produced by Pass 1. Do not re-extract anything eyecite already found.
 
-**A. The citation itself** — identify the citation type and capture the full text. Use the **Citation Taxonomy** and **Short Forms** sections of `citation-toolkit` to recognize the type (cases, constitutional, statutes, rules and regulations, legislative materials, secondary sources, short forms) and follow its guidance on informal references and short-form resolution against the running citation stack.
-
-**B. The proposition** — the assertive clause the citation is offered to support. Follow the **Proposition Extraction** rules in `citation-toolkit` (specific-assertion vs paragraph scope, mid-sentence and footnote handling, string-cite sharing, short-form propositions, `ambiguous_proposition` flag).
+**Pass 3 — proposition extraction.** For every citation (eyecite-extracted *and* gap-pass), capture the assertive clause it supports. eyecite returns the citation strings and their span offsets, not the propositional context — that is on you. Follow the **Proposition Extraction** rules in `citation-toolkit` (specific-assertion vs paragraph scope, mid-sentence and footnote handling, string-cite sharing, short-form propositions, `ambiguous_proposition` flag). Use the spans from Pass 1 to locate each citation in the source text precisely.
 
 Apply the **Parenthetical Handling** rules from `citation-toolkit` when deciding whether a parenthetical like `(quoting X)` or `(citing Y)` creates an independent citation entry.
+
+Maintain a **citation stack** only for gap-category cites and for any eyecite short forms flagged `unresolved_short_form` — eyecite already maintains the stack for everything else.
 
 ---
 
 ## Stage 3 — Citation Resolution
 
-Parse each extracted citation into structured components using the **Structured Component Schemas** in `citation-toolkit` (Cases, Statutes, Federal Regulations, Federal Rules, Secondary Sources, Constitutional Provisions, Legislative Materials).
+For **eyecite-extracted citations** (Pass 1 of Stage 2), structured-component parsing is already done — the JSON entries land in toolkit-schema shape. The only work here is the gap-category cites from Pass 2 and any field cleanup eyecite couldn't do.
 
-Attach flags from the **Flag Vocabulary** in `citation-toolkit` where applicable (`unresolved_short_form`, `informal_reference`, `ambiguous_proposition`, `ambiguous_section_reference`, `uncertain_category`, `citing_parenthetical`, and `subsequent_negative_history` later in Stage 6).
+- **Gap-category cites:** parse into the **Structured Component Schemas** in `citation-toolkit` (Cases, Statutes, Federal Regulations, Federal Rules, Secondary Sources, Constitutional Provisions, Legislative Materials) by hand. This is Haiku-tier mechanical work.
+- **Statute subsection cleanup:** eyecite's `subsection` field is unreliable for forms like `47 U.S.C. § 230(c)(2)`. After Pass 1, re-read the source text for any statute entry where `subsection` is null and a subsection appears in the brief. Either fill it in or flag `ambiguous_section_reference`.
+- **Unresolved short forms:** eyecite already flagged these. Try one more pass against the running stack; if still unresolved, leave the `unresolved_short_form` flag in place for user review.
+
+Attach any remaining flags from the **Flag Vocabulary** in `citation-toolkit` (`informal_reference`, `ambiguous_proposition`, `uncertain_category`, `citing_parenthetical`; `subsequent_negative_history` comes later in Stage 6).
 
 ---
 
