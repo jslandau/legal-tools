@@ -54,9 +54,9 @@ Work through the document page by page. For each page, extract every legal citat
 
 Extraction follows the **two-pass workflow** in `citation-toolkit`'s "Extraction: eyecite is the primitive" section: eyecite extracts every recognized citation in one call, then a focused human pass adds the gap categories. Do NOT free-form scan the document — that is what eyecite is for.
 
-**Pass 1 — eyecite.** Use the MCP path when available: `mcp__claude_ai_CourtListener__extract_citations(text=<substantive text>, resolve=true)`. Otherwise use the local `eyecite_extract.py` script in `citation-toolkit/`. Either way, the output is a JSON array of citations in document order, with `Id.`/`supra`/short cites already resolved to their antecedents — Step 2 (Short Forms) is largely already done for you.
+**Pass 1 — eyecite (local).** Run the local `eyecite_extract.py` script in `citation-toolkit/` over the substantive text. Extraction stays on-machine because briefs are routinely privileged work product. The script's output is a JSON array of citations in document order, with `Id.`/`supra`/short cites already resolved to their antecedents — Step 2 (Short Forms) is largely already done for you.
 
-Do NOT call `analyze_citations` for TOA work — it adds CourtListener verification on top of extraction, which is wasted effort for TOA (TOA only needs the citation strings and their pages, not their verification status).
+**Do NOT** use the MCP's `extract_citations` or `analyze_citations` for this — both upload the full document text to Free Law Project's servers. See `citation-toolkit`'s "Confidentiality" note for the bright-line rule. (TOA also doesn't need CourtListener verification anyway — only the citation strings and their pages.)
 
 **Pass 2 — gap pass.** Walk the substantive content once, looking *only* for the gap categories listed in `citation-toolkit`: administrative decisions (PTAB, FTC, SEC, FCC), EU/international cases (ECLI, ECHR), state constitutional provisions, popular-name statutes ("the Lanham Act"), informal constitutional references ("First Amendment"), and statute subsection breakdowns. Add these to the Pass-1 array.
 

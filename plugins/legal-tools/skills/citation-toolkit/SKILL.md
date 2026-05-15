@@ -23,18 +23,29 @@ Consuming skills (e.g., `cite-checking`, `chain-cite`, `table-of-authorities`) i
 
 ---
 
-## Extraction: eyecite is the primitive
+## Extraction: eyecite is the primitive (local only)
 
 Every consuming skill in `legal-tools` starts with the same step — pull every citation out of a document. That step is **not** a free-form LLM scan. It runs [eyecite](https://github.com/freelawproject/eyecite), the Free Law Project's citation parser trained on 55M+ real citations. eyecite output is **authoritative** for the citation types it recognizes; the consuming-skill's manual pass exists only to fill known gaps (listed below), not to second-guess what eyecite already found.
 
-### Two access paths
+### Confidentiality: extraction runs locally — never over MCP
 
-Either path produces the same toolkit-shaped JSON. Prefer the MCP when loaded; reach for the local script when running offline.
+Legal documents are routinely privileged or work-product protected (draft briefs, internal memos, anything not yet filed publicly). To keep the privilege posture bright-line, **extraction in these skills always runs on-machine** via the local `eyecite_extract.py` script. The CourtListener MCP's `extract_citations` and `analyze_citations` tools both take the **full document text** as input and send it to Free Law Project's servers — they are **not** to be used from any of these skills for any input, ever. The rule is bright-line so there is no judgment call about whether a given input is privileged.
 
-| Path | How | When to use |
-|---|---|---|
-| **MCP (preferred)** | `mcp__claude_ai_CourtListener__extract_citations(text=<doc text>, resolve=true)` — runs eyecite server-side, returns parsed citations with `Id.`/`supra`/short cites already linked to antecedents. No API calls, no rate limit. | Whenever the `claude.ai CourtListener` MCP is available. |
-| **Local script** | `python3 eyecite_extract.py --input <file>` (or stdin) — see `eyecite_extract.py` in this skill's directory. Same eyecite under the hood; emits a JSON array on stdout. | MCP unavailable; offline runs; cases where the skill wants raw span offsets to drive page-tracking or annotation. Requires `pip install eyecite`. |
+For downstream verification, the MCP is fine — but only the tools that operate on **already-public citation strings or IDs** (`call_endpoint`, `search`, `get_endpoint_item`, `get_endpoint_schema`, `get_choices`, `get_more_results`). Those send citation components like `volume=576&reporter=U.S.&page=155`, not the document. See the "Citation lookup (privilege-safe)" subsection of the CourtListener API section below for the components-only lookup pattern that replaces `analyze_citations`.
+
+### How to run eyecite locally
+
+The script lives in this skill's directory: `eyecite_extract.py`. It reads from a file or stdin and emits a JSON array of toolkit-shaped citation entries on stdout.
+
+```bash
+python3 plugins/legal-tools/skills/citation-toolkit/eyecite_extract.py --input brief.txt
+# or:
+cat brief.txt | python3 plugins/legal-tools/skills/citation-toolkit/eyecite_extract.py
+```
+
+Requires `pip install eyecite` (or, on PEP-668 systems like recent Linux distros, a venv: `python3 -m venv .venv && .venv/bin/pip install eyecite && .venv/bin/python plugins/legal-tools/skills/citation-toolkit/eyecite_extract.py --input brief.txt`).
+
+The script does not make any network calls. The document never leaves the machine.
 
 ### What eyecite recognizes
 
@@ -64,8 +75,8 @@ After running eyecite, the consuming skill must walk the document for these. Don
 
 ### How to combine eyecite + the gap pass
 
-1. **Extract:** Run eyecite once over the substantive text (MCP `extract_citations` or local script). This produces a sorted, document-order list with short forms resolved.
-2. **Map onto the toolkit schemas.** The shapes above translate directly. The local script does this for you; if you're working from raw MCP output, map fields by hand using the table.
+1. **Extract:** Run eyecite once over the substantive text via the local `eyecite_extract.py` script. This produces a sorted, document-order list with short forms resolved.
+2. **Map onto the toolkit schemas.** The script already emits toolkit-shaped JSON; no manual mapping needed.
 3. **Walk for gaps.** Read the substantive text once, looking *only* for the gap categories. Don't re-extract what eyecite already found. When you find a gap-category citation, parse it manually into the appropriate schema.
 4. **Apply flags.** Unresolved short forms from eyecite → `unresolved_short_form`. Missing subsection on a statute → `ambiguous_section_reference`. Informal references resolved by the human pass → `informal_reference`.
 5. **Page/proposition tracking is still the skill's job.** eyecite gives you span offsets (character positions), not page numbers — the consuming skill maintains the offset→page map and the proposition for each citation.
@@ -269,11 +280,11 @@ When the `claude.ai CourtListener` MCP server is loaded, use these tools instead
 
 | Task | MCP tool | Notes |
 |------|----------|-------|
-| Parse citations from text (local, no API) | `mcp__claude_ai_CourtListener__extract_citations` | Runs eyecite locally; resolves `Id.`/`supra`/short cites if `resolve=true`. No rate limit. **This is the primary extraction primitive** — see "Extraction: eyecite is the primitive" above for the eyecite-then-gap-pass workflow. |
-| Verify a batch of citations against CourtListener | `mcp__claude_ai_CourtListener__analyze_citations` | Extracts citations from text **and** verifies each unique case citation against the citation-lookup API in one call. Returns case name, date, cite count, verification status, and a **`Cluster ID`** for each verified case (NOT an opinion ID — see Step 2 below). Replaces Step 1 (citation-lookup) for nearly all use cases. For >250 unique cites, returns a `job_id` — resume with `resume_citation_analysis`. |
-| Resume a long verification job | `mcp__claude_ai_CourtListener__resume_citation_analysis` | Use after `analyze_citations` returns pending citations. `wait=true` sleeps through a short rate-limit window automatically. |
+| ~~Parse citations from text~~ | ~~`extract_citations`~~ | **DO NOT USE from these skills.** This tool takes the full document text as input and sends it to Free Law Project's servers — privilege/work-product risk. Run the local `eyecite_extract.py` script instead. See "Extraction: eyecite is the primitive (local only)" above. |
+| ~~Verify a batch of citations~~ | ~~`analyze_citations`~~ | **DO NOT USE from these skills.** Same privilege issue — accepts and uploads document text. For verifying a parsed citation against CourtListener, use the components-only `call_endpoint("citation-lookup", ...)` pattern below, which sends only the citation's `volume/reporter/page` (already public). |
+| ~~Resume verification~~ | ~~`resume_citation_analysis`~~ | **DO NOT USE.** Only relevant as a companion to `analyze_citations`, which is also banned. |
 | Look up a specific opinion by ID | `mcp__claude_ai_CourtListener__get_endpoint_item` with `endpoint_id="opinions"` | Replaces Step 2 (opinion fetch). **Always pass `fields=[...]`** — opinion text fields are huge. Useful field allowlists below. |
-| Look up an opinion cluster (parallel cites, sub-opinions, case metadata) | `get_endpoint_item` with `endpoint_id="clusters"` | When `analyze_citations` returns a `cluster_id` and you need its sub-opinions list, court, date, or canonical case name. |
+| Look up an opinion cluster (parallel cites, sub-opinions, case metadata) | `get_endpoint_item` with `endpoint_id="clusters"` | When the components-only `citation-lookup` call returns a `cluster_id` and you need its sub-opinions list, court, date, or canonical case name. |
 | Free-text or fielded search | `mcp__claude_ai_CourtListener__search` | Use when the user has a case name but no cite, or to disambiguate between clusters. Pass `type="o"` for opinions, `"d"` for dockets, `"p"` for judges, `"oa"` for oral argument. Always pass `fields=[...]`. |
 | Discover an endpoint's schema | `mcp__claude_ai_CourtListener__get_endpoint_schema` | When you need a field that's not on the search index — e.g., the full `opinions-cited` graph, party/attorney detail, financial disclosures. |
 | Call any non-search endpoint | `mcp__claude_ai_CourtListener__call_endpoint` | For docket entries, recap-documents, opinions-cited, courts, parties, attorneys, etc. Pass `fields=[...]`. |
@@ -309,7 +320,7 @@ Before doing any pincite extraction, run a one-shot check on the chosen opinion'
 
 The detection algorithm:
 
-1. From `analyze_citations` (or the cluster's `citations` array), note the **reporter** the brief used (e.g., `F.3d`, `U.S.`, `S. Ct.`) and the **starting page** of the cited case.
+1. From the local eyecite output (or the cluster's `citations` array after `citation-lookup`), note the **reporter** the brief used (e.g., `F.3d`, `U.S.`, `S. Ct.`) and the **starting page** of the cited case.
 2. Scan `html_with_citations` for star-pagination markers using this combined pattern (covers known conventions): `\*(\d+)\b | label="(\d+)" | page-label="(\d+)" | \f(\d+)`. The last alternative — form-feed + number — catches slip-opinion pagination from court-direct ingests (e.g., SCOTUS slips, Ninth Circuit en banc PDFs).
 3. Compare the marker number range to the cited starting page:
    - **Markers exist AND the cited pincite page falls inside the marker range** (start ≤ pincite ≤ end) → `pagination_mode: "reporter"`. Use page-based pincite extraction.
@@ -347,26 +358,32 @@ The Bluebook signal (`See`, `Cf.`, `But see`, `See generally`, etc.) tells you w
 
 When a citation uses a signal not listed here (e.g., `accord`, `see also`), default to the standard bar but note the signal in the explanation. Always record the signal alongside the proposition so Stage 6 has the necessary context.
 
-#### Step 1 (MCP) — Resolve a citation to an opinion
+#### Step 1 (MCP) — Resolve a citation to an opinion (privilege-safe, components only)
 
-For a single ad-hoc citation, the simplest call is:
+Once you've parsed the citation locally via `eyecite_extract.py`, look it up against CourtListener using the citation-lookup endpoint with **citation components only** — never document text:
 
 ```
-analyze_citations(text="<the cite as it appears, with surrounding context if available>")
+call_endpoint(
+  endpoint_id="citation-lookup",
+  method="POST",
+  body={"volume": "<vol>", "reporter": "<reporter>", "page": "<page>"},
+)
 ```
 
-For batches of citations already in a document, pass the document text — eyecite extracts and dedupes for you. For >250 unique citations, capture the returned `job_id` and call `resume_citation_analysis(job_id=...)` (with `wait=true` if rate-limited).
+This sends only the citation's public components (e.g., `volume=576&reporter=U.S.&page=155`), not the brief. The response's `clusters` array gives one or more candidate clusters; pick the right one by matching `case_name`, `date_filed`, and `citations` against what the brief says. Each cluster carries a `Cluster ID`.
+
+For batches, loop over the unique citations from your local eyecite output and call this endpoint once per cite. Rate limit: 60 valid citations/minute — pace accordingly. **Do NOT use `analyze_citations` or pass document text to citation-lookup** even though the endpoint accepts a `text` parameter — those paths upload the full document.
 
 #### Step 2 (MCP) — Fetch the opinion text
 
-**Critical:** `analyze_citations` returns a **`Cluster ID`**, not an opinion ID. The `opinions` endpoint takes an opinion ID; passing a cluster ID will silently return whatever unrelated opinion happens to share that integer (or, for older single-opinion clusters, the correct opinion only by coincidence). You MUST resolve cluster → opinion first.
+**Critical:** the citation-lookup response gives a **`Cluster ID`**, not an opinion ID. The `opinions` endpoint takes an opinion ID; passing a cluster ID will silently return whatever unrelated opinion happens to share that integer (or, for older single-opinion clusters, the correct opinion only by coincidence). You MUST resolve cluster → opinion first.
 
 **Step 2a — Resolve cluster ID to opinion ID(s):**
 
 ```
 call_endpoint(
   endpoint_id="clusters",
-  query={"id": <cluster_id_from_analyze_citations>},
+  query={"id": <cluster_id_from_citation_lookup>},
   num_results=1,
 )
 ```
@@ -430,7 +447,7 @@ Once an opinion is fetched (by either path), confirm it's the right one before u
 - Confirm the reporter volume, reporter abbreviation, starting page, and party names match the input citation.
 - If the fetched opinion has a different starting page, it is a different case — do not use it; treat the lookup as failed and fall through to the next source.
 
-When using `analyze_citations`, the MCP performs a case-name cross-check automatically and emits a WARNING for likely hallucinated citations (verified by reporter but case name diverges). Treat that warning as failure-of-identity for the purpose of the escalation chain below.
+After fetching the candidate cluster from `citation-lookup`, perform the case-name cross-check yourself: compare the cluster's `case_name` to the brief's party names. If they diverge while the reporter/volume/page match, the brief likely contains a hallucinated or transposed citation — treat as failure-of-identity for the escalation chain below.
 
 ### Escalation chain for US cases
 
