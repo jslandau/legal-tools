@@ -2,7 +2,7 @@
 
 A Claude Code plugin with three skills for legal document work: extracting a Table of Authorities, verifying citations, and tracing a citation's lineage.
 
-US case-law lookups go through the [claude.ai CourtListener MCP server](https://www.courtlistener.com/help/api/) when it's available (token required but setup when MCP is, batched citation verification via eyecite + citation-lookup in one call), with a scripted REST-API fallback for environments without the MCP.  
+**Citation extraction runs locally** via [eyecite](https://github.com/freelawproject/eyecite). Document text never leaves your machine — important for privileged work product like draft briefs. US case-law *verification* goes through the [claude.ai CourtListener MCP server](https://www.courtlistener.com/help/api/) when available, but only via components-only lookups (`volume`/`reporter`/`page`) and ID-based fetches — never the document text. A scripted REST-API fallback is supported for environments without the MCP.
 
 MCP support appears to work but hasn't been extensively tested, please double-check (and please file any bugs you encounter as issues).
 
@@ -62,12 +62,33 @@ Then install the plugin, either via the /plugin TUI or via the following command
 
 ## Requirements
 
-US case-law lookups require access to CourtListener. Two paths, in order of preference:
+### Local citation extraction (all skills)
 
-- **CourtListener MCP server (preferred)** — when the `claude.ai CourtListener` MCP server is installed and connected, no token is needed. The skills use `analyze_citations`, `get_endpoint_item`, and related MCP tools directly. Auth and rate limiting are handled by the MCP. This path also batches eyecite extraction with citation-lookup in one call, which is materially faster on documents with many citations.
-- **CourtListener REST API (fallback)** — when the MCP is not available, a free CourtListener API token is required for `cite-checking` and `chain-cite`. Get one at [courtlistener.com/sign-in](https://www.courtlistener.com/sign-in/). The skills will ask for the token at the start of a run when they detect the MCP is absent.
+All three skills extract citations from documents using [eyecite](https://github.com/freelawproject/eyecite), running locally on your machine. Install it once:
 
-`table-of-authorities` does not require either path — it uses local citation extraction (eyecite via the MCP's `extract_citations` tool when available, the skill's own parser otherwise) and does not need to verify citations against CourtListener.
+```bash
+pip install eyecite
+```
+
+On systems where pip refuses to install into the system Python (PEP 668 — recent Linux distros, Homebrew Python on macOS), use a venv:
+
+```bash
+python3 -m venv ~/.legal-tools-venv
+~/.legal-tools-venv/bin/pip install eyecite
+```
+
+The skills will tell you what Python to invoke. The extraction script lives at `plugins/legal-tools/skills/citation-toolkit/eyecite_extract.py` and is invoked automatically.
+
+**Why local:** legal documents are routinely privileged or work-product protected. Running extraction on-machine keeps the document text off the network entirely. The skills enforce this as a bright-line rule — they never call the CourtListener MCP's `extract_citations` or `analyze_citations` tools, both of which would upload the document.
+
+### CourtListener access (for `cite-checking` and `chain-cite`)
+
+US case-law *verification* (looking up a citation by `volume`/`reporter`/`page` and fetching the opinion text) goes through CourtListener. Two paths, in order of preference:
+
+- **CourtListener MCP server (preferred)** — when the `claude.ai CourtListener` MCP server is installed and connected, no token is needed. The skills use the components-only `call_endpoint("citation-lookup", ...)`, `get_endpoint_item`, and `search` tools. Auth and rate limiting are handled by the MCP. Only public citation strings and IDs cross the wire.
+- **CourtListener REST API (fallback)** — when the MCP is not available, a free CourtListener API token is required. Get one at [courtlistener.com/sign-in](https://www.courtlistener.com/sign-in/). The skills will ask for the token at the start of a run when they detect the MCP is absent.
+
+`table-of-authorities` does not need CourtListener at all — it only needs the local eyecite extraction.
 
 ## Supported document formats
 
