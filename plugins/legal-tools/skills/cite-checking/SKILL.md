@@ -1,6 +1,6 @@
 ---
 name: cite-checking
-description: Use when verifying citations in a legal brief or document — scans for every citation, looks up each source online, extracts the pincite text, and produces a standalone report assessing how well each citation supports the proposition it is cited for, with a critic subagent review of each assessment
+description: Use when verifying citations in a legal brief or document — extracts every citation locally via eyecite (document text never leaves the machine, important for privileged work product), looks up each source online via CourtListener and other public sources, extracts the pincite text, and produces a standalone report assessing how well each citation supports the proposition it is cited for, with a critic subagent review of each assessment
 ---
 
 # Cite-Checking

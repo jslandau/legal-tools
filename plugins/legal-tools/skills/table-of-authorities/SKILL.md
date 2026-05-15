@@ -1,6 +1,6 @@
 ---
 name: table-of-authorities
-description: Use when extracting citations from a legal brief to build a Table of Authorities - scans document pages, identifies and categorizes all legal citations (cases, statutes, constitutional provisions, legislative materials, secondary sources), resolves short forms (Id., supra, reporter-only cites) back to full citations, and produces a categorized TOA with page references in both structured data and formatted legal output
+description: Use when extracting citations from a legal brief to build a Table of Authorities - runs eyecite locally to extract and categorize all legal citations (cases, statutes, constitutional provisions, legislative materials, secondary sources) with short forms (Id., supra, reporter-only cites) already resolved, walks the document for gap categories eyecite does not catch (administrative decisions, popular-name statutes, informal references), and produces a categorized TOA with page references in both structured data and formatted legal output. Document text never leaves the machine.
 ---
 
 # Table of Authorities Extraction
