@@ -26,7 +26,7 @@ The source document is never modified.
 Ask the user:
 1. **What is the document?** (file path or paste content)
 2. **What format is it in?** PDF, plain text/Markdown, DOCX, or Word with tracked changes
-3. **Where should the output report be saved?** (suggest: same directory as the document, named `<original-filename>-cite-check.md`)
+3. **Where should the output be saved?** Three sibling files are produced: a human-readable Markdown report (`<original-filename>-cite-check.md`), a structured data file (`<original-filename>-cite-check.json`), and a self-contained interactive HTML report (`<original-filename>-cite-check.html`) that the user opens in a browser. Default location: same directory as the source document.
 4. **CourtListener access.** If the `claude.ai CourtListener` MCP server is available, no token is needed — Stage 4 uses the MCP directly. Otherwise, ask for a CourtListener API token (free at courtlistener.com/sign-in/) and note it for the scripted-fallback path in Stage 4.
 
 ## Supported Formats
@@ -70,6 +70,10 @@ Read the document. Identify the substantive pages to process:
 3. **Skip back matter.** Exclude certificates of compliance, certificates of service, signature pages after CONCLUSION.
 4. **Include footnotes** on substantive pages — they often contain important citations.
 5. **Exclude non-authority references.** References to other briefs ("Blue Br.", "Appellant's Br."), appendix cites ("Appx123"), and record cites ("R. at 45") are not legal authorities — skip them.
+
+**Retain document structure for JSON emission.** While walking the document, keep enough structure to populate the `document` block of the JSON output (Stage 8): substantive page numbers and their text, section headings and the page ranges they cover, and the footnote-id → footnote-text map (already produced by the DOCX script). For each citation captured in Stage 2, record its location as `{page, section, footnote_id?, snippet}` where `snippet` is the surrounding sentence (≈40–80 words centered on the citation) for use as in-context preview.
+
+**Page numbering rule for `location.page`.** Use the brief's own page numbering — the number a reader sees in the document's footer/header. Not a 0-indexed offset, not an extraction-ordinal index, not a count of paragraphs. For PDFs, prefer the document's *printed* pagination over the raw PDF page index (cover pages, certificates of interest, TOCs, and tables of authority shift the offset, typically by several pages). For DOCX where the extraction script does not track pages directly, infer page boundaries from in-text page markers when present (e.g., `## PAGE 6`), and **always verify by spot-checking at least one emitted `location.page` value against the source brief before emitting any of them** — an off-by-one in page numbering propagates through every citation and silently breaks every downstream tool that uses page references. When unable to verify, ask the user to confirm one or two pages and calibrate the rest, rather than guessing.
 
 ---
 
@@ -310,9 +314,39 @@ Explanation: [explanation]
 
 ## Stage 8 — Report Generation
 
-After all citations have been processed through Stages 4–7, produce the cite-check report.
+After all citations have been processed through Stages 4–7, produce **three sibling output files**:
 
-Save the report to the path agreed with the user before starting (default: `<original-filename>-cite-check.md` in the same directory as the source document).
+1. **Markdown report** — human-readable narrative report at `<original-filename>-cite-check.md`.
+2. **JSON data file** — structured data at `<original-filename>-cite-check.json`. The JSON is the source of truth and is consumed by downstream tools; the Markdown and HTML are rendered from it.
+3. **Self-contained interactive HTML report** — at `<original-filename>-cite-check.html`. Produced by taking the explorer template at `./explorer-template.html` (in this skill's directory) and inlining the JSON from step 2 into its `<script type="application/json" id="cite-check-data">` block. The result is a single-file, dependency-free HTML report the user opens in a browser to explore the cite-check interactively (severity filters, sort/grouping, brief-vs-pincite diffs, page-number minimap, Print/PDF).
+
+All three files must be written for every run. If the user specified an output path that has none of these extensions, write all three (`<path>.md`, `<path>.json`, `<path>.html`).
+
+**HTML emission recipe.** Use the following Python snippet (adjusting paths) to assemble the HTML report:
+
+```python
+import re, pathlib
+# Resolve the explorer template alongside this skill.
+# SKILL_DIR is the directory containing SKILL.md and explorer-template.html.
+tmpl_path = SKILL_DIR / 'explorer-template.html'
+json_path = pathlib.Path('<original-filename>-cite-check.json')
+out_path  = pathlib.Path('<original-filename>-cite-check.html')
+
+tmpl = tmpl_path.read_text()
+data = json_path.read_text().rstrip()
+pattern = re.compile(
+    r'(<script type="application/json" id="cite-check-data">)[^<]*(</script>)',
+    re.S,
+)
+new_html, n = pattern.subn(
+    lambda m: m.group(1) + '\n' + data + '\n' + m.group(2),
+    tmpl, count=1,
+)
+assert n == 1, "explorer template is missing the cite-check-data script block"
+out_path.write_text(new_html)
+```
+
+Do not modify the explorer template itself when emitting a report — only swap the JSON block. If you find yourself needing to change the explorer's structure or styles, edit `explorer-template.html` directly (it is the canonical source) rather than patching post-hoc inside the recipe above.
 
 ### Report Structure
 
@@ -382,3 +416,118 @@ If critic unavailable: add `⚠ CRITIC UNAVAILABLE — primary analysis only` im
 - Asked user: [yes/no — what they said]
 - Status: Unverifiable
 ```
+
+### JSON Output Schema
+
+The JSON file mirrors the analytical content of the Markdown but is keyed for programmatic access. It has two top-level blocks: `document` (structure of the source) and `citations` (array, one entry per citation).
+
+```jsonc
+{
+  "schema_version": "1.0",
+  "generated_at": "YYYY-MM-DDTHH:MM:SSZ",
+
+  "document": {
+    "filename": "string — basename of the source file",
+    "title": "string — brief title (e.g., 'Appellant's Opening Brief')",
+    "case_no": "string — docket number and court, if identifiable",
+    "format": "docx | pdf | md | txt",
+    "pages": [
+      { "number": 1, "text": "full page text, with [FNx: ...] footnote markers inlined" }
+    ],
+    "sections": [
+      { "heading": "INTRODUCTION", "page_start": 1, "page_end": 3 },
+      { "heading": "ARGUMENT", "page_start": 4, "page_end": 18 }
+    ],
+    "footnotes": {
+      "12": "full text of footnote 12"
+    },
+    "notes": "free text — extraction caveats (e.g., 'DOCX page boundaries are approximate')"
+  },
+
+  "citations": [
+    {
+      "id": "c1",                              // stable per-run identifier
+      "doc_index": 1,                          // 1-based order of appearance in the document
+      "citation": {
+        "full_text": "Ford Motor Co. v. United States, 405 U.S. 562, 573 (1972).",
+        "short_label": "Ford Motor",           // short form for grouping/UI
+        "case_key": "Ford Motor",              // stable key for grouping repeated cites of the same opinion
+        "type": "case | statute | regulation | rule | constitution | secondary | legislative | other",
+        "authority_level": "scotus | circuit | district | state-high | state-app | agency | secondary | other",
+        "components": { /* per citation-toolkit Structured Component Schemas */ },
+        "signal": "none | see | see-also | cf | but-see | but-cf | accord | contra | compare | string-cite-member",
+        "flags": ["unresolved_short_form", "informal_reference", "ambiguous_proposition", "..."]
+      },
+      "location": {
+        "page": 12,
+        "section": "ARGUMENT",
+        "footnote_id": null,                   // string id if cite appears in a footnote
+        "snippet": "≈40–80 words of surrounding context, with the cite included verbatim"
+      },
+      "proposition": {
+        "text": "the brief's assertive clause the citation is offered to support",
+        "ambiguous": false,                    // set true when extraction was uncertain
+        "proposition_group": "remedy-discretion" // optional — shared key when multiple cites support the same proposition (e.g., string cites)
+      },
+      "source": {
+        "found": true,
+        "fetch_path": "courtlistener-mcp | courtlistener-rest | google-scholar | justia | direct-court | user-provided | none",
+        "courtlistener": {
+          "cluster_id": "108494",
+          "opinion_id": "9424801",
+          "pagination_mode": "reporter | slip_only | none"
+        },
+        "external_url": "https://...",         // when fetched outside CourtListener
+        "unverifiable_reason": null            // populated when found=false
+      },
+      "pincite": {
+        "text": "the actual passage retrieved from the source at the pincite",
+        "match_tier_used": 1,                  // 1–4 per Stage 5 ladder
+        "brief_quote": "the language the brief presents in quotation marks (populated whenever the brief quotes the source, whether or not the quote matches)",
+        "actual_text": "the source's actual language at the same locus — the counterpart to brief_quote",
+        "quote_match": true,                   // true when brief_quote matches actual_text verbatim; false when it diverges
+        "match_phrase": "the substring of actual_text that constitutes the verbatim match (populated only when quote_match is true; used by renderers to highlight the matching span)"
+      },
+      "precis": "2–5 sentence neutral summary of what the source says at the pincite",
+      "support": {
+        "label": "Strong | Adequate | Weak | Misleading | Unable",
+        "note": "optional short qualifier shown alongside the label (e.g., 'with caveats', 'upgraded from Weak after cross-check')",
+        "explanation": "2–4 sentence rationale, quoting pincite language where useful",
+        "issues": ["misquote", "mischaracterization", "wrong-pincite",
+                   "denominator-error", "posture-error", "holding-inversion",
+                   "misspelling", "citation-form", "strategic-omission",
+                   "framing-inversion", "doctrinal-fit", "weight-concern"]
+      },
+      "critic": {
+        "status": "agrees | partial | disagrees | not-dispatched | unavailable",
+        "reasoning": "critic's own 2–4 sentence assessment (omitted when not-dispatched)",
+        "nuance": "additional observations (optional)"
+      },
+      "subsequent_negative_history": {         // omit when none
+        "treatment": "overruled | abrogated | limited",
+        "by_case": "Loper Bright Enterprises v. Raimondo, 603 U.S. 369 (2024)",
+        "affects_proposition": true
+      },
+      "action": "optional — concrete suggested fix for the brief preparer"
+    }
+  ]
+}
+```
+
+#### Field Conventions
+
+- **`support.label`** uses canonical short forms: `Strong`, `Adequate`, `Weak`, `Misleading`, `Unable` (NOT `"Unable to assess"`). The Markdown report's longer phrasing is rendered from this token.
+- **`support.issues`** is an open-vocabulary array; the values above are the recognized set. Add a new value only when none of the existing values fits, and document the addition in the run's `document.notes`.
+- **`pincite.brief_quote` and `pincite.actual_text`** populate together whenever the brief presents quoted language attributed to the source — *regardless* of whether the quote matches or diverges. Set `pincite.quote_match` to `true` when the brief's quoted language appears verbatim (or near-verbatim) in the source; in that case also populate `pincite.match_phrase` with the substring of `actual_text` that constitutes the match (downstream renderers use it to highlight the matching span). Set `quote_match` to `false` and omit `match_phrase` when the quote diverges materially. Omit all four fields when the brief paraphrases without quotation marks. Renderers display three modes: **match** (both sides match, ✓✓, highlighted span), **divergent** (✕ brief vs ✓ source), and **neutral** (proposition vs pincite, no quote). The Markdown report's diff symbology should follow the same rule.
+
+- **`actual_text` must be a narrow excerpt, not the full pincite.** Aim for one or two sentences containing `match_phrase` (in match mode) or the brief's quoted language (in divergent mode). The broader surrounding passage lives in `pincite.text`. Renderers show `actual_text` by default and surface `pincite.text` only on expansion, so users see the directly relevant language first and the surrounding context one click away. Emitting the full pincite into `actual_text` defeats this — it hides the matched language inside a wall of unrelated text. The two fields are *not* interchangeable: `actual_text` is the targeted excerpt; `pincite.text` is the broader passage extracted in Stage 5.
+
+- **`actual_text` must be literal source text, not a description of it.** It is a verbatim (or near-verbatim, with bracketed alterations Bluebook-style) excerpt of what the source actually says — copy-pasteable into a brief. Strings like `"(verbatim except where bracketed)"`, `"see pincite"`, or any other meta-description that summarizes the relationship between the brief and source instead of quoting the source are NOT valid values. If the brief uses a string-of-quotes form and you cannot pick a single excerpt that contains all of them, prefer the excerpt that contains the most representative match_phrase and leave the broader assembly in `pincite.text`. The same rule applies to `brief_quote` — it must be a literal excerpt of what the brief says, not a description.
+- **`citation.case_key`** identifies the underlying opinion, not the pincite. Multiple entries pinning to different pages of the same opinion (e.g., `@ 70`, `@ 105`, `@ 107`) share a single `case_key` so consumers can group them.
+- **`proposition.proposition_group`** is a free-text slug shared across citations supporting the same assertion (string cites). Use the same slug across all members of the group; omit when a citation stands alone.
+- **`location.snippet`** is for human display; do not over-truncate (do not cut the citation itself). For citations in footnotes, the snippet should be drawn from the footnote text and `location.footnote_id` set; `location.page` is the body page on which the footnote-reference appears.
+- **Critic-disagreement marker.** The `⚠ CRITIC DISAGREES` / `⚠ CRITIC UNAVAILABLE` markers in the Markdown report are derived from `critic.status` (`disagrees`/`partial` → disagreement marker; `unavailable` → unavailable marker). Do not duplicate them as separate fields.
+
+#### Determinism
+
+The MD report and the JSON file are generated from the same in-memory analysis. They must agree: every citation in the MD report appears in the JSON `citations` array (and vice versa), every label in the MD matches `support.label` for the corresponding entry, and the per-citation order in the MD report matches ascending `doc_index` in the JSON.
