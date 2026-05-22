@@ -33,31 +33,15 @@ Ask the user:
 
 - **PDF:** Use the Read tool. Use the document's own page numbering (footers/headers), NOT raw PDF page numbers.
 - **Plain text / Markdown:** Look for explicit page markers (e.g., `## PAGE 1`). Ask the user to clarify if not obvious.
-- **DOCX / Word with tracked changes:** Extract text using this python3 script, which also inlines footnotes with `[FNx: ...]` markers:
+- **DOCX / Word with tracked changes:** Extract text using the `docx_extract.py` script in this skill's directory. It emits paragraph text with footnotes inlined as `[FNx: ...]` markers, accepts accepted/inserted text, and drops deleted text:
 
   ```bash
-  python3 -c "
-  import zipfile, xml.etree.ElementTree as ET
-  def extract(path):
-      with zipfile.ZipFile(path) as z:
-          doc_tree = ET.parse(z.open('word/document.xml'))
-          fn_text = {}
-          if 'word/footnotes.xml' in z.namelist():
-              for fn in ET.parse(z.open('word/footnotes.xml')).getroot().iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}footnote'):
-                  fid = fn.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id')
-                  fn_text[fid] = ''.join(t.text for t in fn.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t') if t.text)
-      ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-      paras = []
-      for p in doc_tree.getroot().iter(f'{{{ns}}}p'):
-          line = ''.join(t.text for t in p.iter(f'{{{ns}}}t') if t.text)
-          refs = [f'[FN{r.get(\"{{{ns}}}id\")}: {fn_text.get(r.get(\"{{{ns}}}id\"),\"\")}]' for r in p.iter(f'{{{ns}}}footnoteReference')]
-          if line.strip() or refs: paras.append(line + ' '.join(refs))
-      return '\n\n'.join(paras)
-  print(extract('FILEPATH'))
-  "
+  python3 plugins/legal-tools/skills/cite-checking/docx_extract.py path/to/brief.docx
+  # or write to a file:
+  python3 plugins/legal-tools/skills/cite-checking/docx_extract.py path/to/brief.docx --output extracted.txt
   ```
 
-  Replace `FILEPATH` with the document path. Page boundaries in DOCX are approximate — warn the user. For tracked changes, the script extracts accepted-changes text; deleted text is ignored and inserted text is present.
+  Stdlib-only — no `pip install` required. Page boundaries in DOCX are approximate — warn the user.
 
 ---
 
@@ -125,17 +109,18 @@ For each resolved citation, attempt to locate the full source text using the pri
 1. EUR-Lex (eur-lex.europa.eu) — Court of Justice of the EU; search by ECLI or case name
 2. HUDOC (hudoc.echr.coe.int) — European Court of Human Rights; search by application number or party names
 
-**Federal statutes:**
-1. Cornell LII (law.cornell.edu/uscode) — navigate to title and section directly
-2. law.gov / Office of the Law Revision Counsel (uscode.house.gov)
+**Federal statutes (U.S.C.):** Resolve via `lii_fetcher.py` in the `citation-toolkit` skill — see citation-toolkit's "LII source resolution" section for the full pattern. Build a single JSON array of all statute/regulation entries from Pass 1 + Pass 2 of Stage 2 and invoke the script once per run:
 
-**Federal regulations:**
-1. eCFR (ecfr.gov) — navigate to title and section directly
-2. GovInfo (govinfo.gov)
-3. Federal Register (federalregister.gov) — for citations to specific Federal Register pages
+```bash
+python3 plugins/legal-tools/skills/citation-toolkit/lii_fetcher.py --input lii-requests.json > lii-results.json
+```
+
+Each result carries `status`, `section_text`, `subsection_text` (when a subsection was requested and matched), and an LII URL. Set `source.fetch_path` to `"lii"` on the citation entry. On `status == "not_found"`, fall through to escalation: ask the user for a direct URL or alternate source; if they can't help, mark `unverifiable`. On `status == "anchor_not_found"`, treat it as a soft failure — the section is present on LII but the cited subsection wasn't tagged; ask the user to confirm the subsection text before assessing support (this is intentionally a false negative; see citation-toolkit's "No fallback" note).
+
+**Federal regulations (C.F.R.):** Same path as statutes — use `lii_fetcher.py` with `type: "regulation"`. LII's CFR coverage is patchier than its U.S.C. coverage (some sections are `[RESERVED]`, some have content but no subsection anchors); rely on the `subsection_anchor_not_found` and `source_not_found` flags rather than guessing. eCFR (ecfr.gov), GovInfo (govinfo.gov), and Federal Register (federalregister.gov) remain available as user-supplied fallbacks when LII comes back empty.
 
 **Federal rules:**
-1. Cornell LII (law.cornell.edu) — covers FRCP, FRAP, FRE, and other federal rules
+1. Cornell LII (law.cornell.edu) — covers FRCP, FRAP, FRE, and other federal rules. Not yet wired into `lii_fetcher.py`; navigate to title and section directly until the rules type is folded in.
 2. Direct court websites — Supreme Court Rules at supremecourt.gov
 
 **Constitutional provisions:**
@@ -194,8 +179,8 @@ Extract enough context to understand the proposition being stated (typically 100
 
 ### Other source types
 
-- **Statutes and regulations:** Retrieve the text of the cited section/subsection in full.
-- **Federal rules:** Retrieve the text of the cited rule and subsection in full.
+- **Statutes and regulations (U.S.C., C.F.R.):** The pincite is already extracted in Stage 4 by `lii_fetcher.py`. Use `subsection_text` when present; fall back to `section_text` when no subsection was cited or when `anchor_matched` is false. **There is no match ladder for statutes and regulations** — the subsection anchor is the locator, or it isn't. Skip `match_tier_used` on these entries (emit `null` in the JSON). When `status == "anchor_not_found"`, prefer asking the user to point at the cited subsection over silently scanning the full-section text for a paraphrase.
+- **Federal rules:** Retrieve the text of the cited rule and subsection in full (not yet automated; navigate to LII manually).
 - **Secondary sources:** Navigate to the pincite page. Extract the relevant passage.
 - **Constitutional provisions:** Use the standard text of the cited provision.
 - **Legislative materials:** Retrieve the relevant passage from the Congressional Record, report, or hearing transcript.
@@ -229,6 +214,25 @@ Assign one of these labels:
 | **Unable to assess** | Source was not located, pincite text could not be retrieved, or the cited passage is inaccessible. |
 
 Write a 2–4 sentence explanation of why you assigned this label, quoting relevant language from the pincite text where possible.
+
+### Statutes and Regulations — Narrowed Rubric
+
+For citations to statutes (U.S.C.) and federal regulations (C.F.R.), the Strong/Adequate/Weak/Misleading spectrum collapses. Statute language is fixed; either the brief characterizes it faithfully or it doesn't. Use only three labels for these entries:
+
+| Outcome | Label |
+|---|---|
+| Brief's characterization matches the cited subsection text | **Strong** |
+| Brief misstates the subsection text — wrong text, dropped qualifier, shifted meaning, or the cited subsection doesn't say what the brief claims | **Misleading** |
+| Section not found on LII (`source_not_found`); or subsection anchor not found and the user couldn't confirm the cited text (`subsection_anchor_not_found` after escalation) | **Unable** |
+
+Do not use Adequate or Weak for statutes — there is no inferential gap to interpolate over.
+
+**Quotation marks vs. paraphrase** is the key distinction within Strong/Misleading:
+
+- **If the brief presents the statute language in quotation marks**, it must match the source verbatim, subject to the standard Bluebook alterations: `[brackets]` for capitalization/pluralization/clarity tweaks that don't change meaning, `…` or `* * *` for elisions, `[emphasis added]` / `[emphasis in original]` notations. Apply the same `pincite.brief_quote` / `pincite.actual_text` / `pincite.quote_match` / `pincite.match_phrase` machinery the case-side uses (see the Field Conventions in Stage 8). A quote that diverges materially → **Misleading**, with `issues: ["misquote"]`. A quote that diverges only in unbracketed trivial alterations → **Misleading** with `issues: ["citation-form"]` (the brief should have bracketed the change).
+- **If the brief paraphrases without quotation marks**, the rule is "operative text captured." A paraphrase that conveys the statute's actual command — including all material qualifiers like "knowingly," "willfully," "materially," "in writing" — is **Strong**. A paraphrase that drops a qualifier in a way that changes meaning, or that imports a requirement the statute doesn't contain, is **Misleading**.
+
+The Stage 7 critic still runs for statutes and regulations — it's well suited to catching paraphrases that look faithful but elide a qualifier.
 
 ### Signal-Relativized Assessment
 
@@ -322,31 +326,15 @@ After all citations have been processed through Stages 4–7, produce **three si
 
 All three files must be written for every run. If the user specified an output path that has none of these extensions, write all three (`<path>.md`, `<path>.json`, `<path>.html`).
 
-**HTML emission recipe.** Use the following Python snippet (adjusting paths) to assemble the HTML report:
+**HTML emission.** Run the `assemble_html.py` script in this skill's directory. It reads `explorer-template.html` (alongside the script), inlines the JSON file into the template's `<script type="application/json" id="cite-check-data">` block, and writes the result:
 
-```python
-import re, pathlib
-# Resolve the explorer template alongside this skill.
-# SKILL_DIR is the directory containing SKILL.md and explorer-template.html.
-tmpl_path = SKILL_DIR / 'explorer-template.html'
-json_path = pathlib.Path('<original-filename>-cite-check.json')
-out_path  = pathlib.Path('<original-filename>-cite-check.html')
-
-tmpl = tmpl_path.read_text()
-data = json_path.read_text().rstrip()
-pattern = re.compile(
-    r'(<script type="application/json" id="cite-check-data">)[^<]*(</script>)',
-    re.S,
-)
-new_html, n = pattern.subn(
-    lambda m: m.group(1) + '\n' + data + '\n' + m.group(2),
-    tmpl, count=1,
-)
-assert n == 1, "explorer template is missing the cite-check-data script block"
-out_path.write_text(new_html)
+```bash
+python3 plugins/legal-tools/skills/cite-checking/assemble_html.py \
+  --json brief-cite-check.json \
+  --out  brief-cite-check.html
 ```
 
-Do not modify the explorer template itself when emitting a report — only swap the JSON block. If you find yourself needing to change the explorer's structure or styles, edit `explorer-template.html` directly (it is the canonical source) rather than patching post-hoc inside the recipe above.
+Do not modify the explorer template itself when emitting a report — only swap the JSON block (which is exactly what the script does). If you need to change the explorer's structure or styles, edit `explorer-template.html` directly (it is the canonical source) rather than patching post-hoc.
 
 ### Report Structure
 
@@ -471,11 +459,17 @@ The JSON file mirrors the analytical content of the Markdown but is keyed for pr
       },
       "source": {
         "found": true,
-        "fetch_path": "courtlistener-mcp | courtlistener-rest | google-scholar | justia | direct-court | user-provided | none",
+        "fetch_path": "courtlistener-mcp | courtlistener-rest | lii | google-scholar | justia | direct-court | user-provided | none",
         "courtlistener": {
           "cluster_id": "108494",
           "opinion_id": "9424801",
           "pagination_mode": "reporter | slip_only | none"
+        },
+        "lii": {                               // present when fetch_path=lii (statute/regulation)
+          "url": "https://www.law.cornell.edu/uscode/text/17/512",
+          "anchor": "c_2",
+          "anchor_matched": true,
+          "status": "ok | anchor_not_found | not_found | network_error"
         },
         "external_url": "https://...",         // when fetched outside CourtListener
         "unverifiable_reason": null            // populated when found=false
@@ -527,6 +521,7 @@ The JSON file mirrors the analytical content of the Markdown but is keyed for pr
 - **`proposition.proposition_group`** is a free-text slug shared across citations supporting the same assertion (string cites). Use the same slug across all members of the group; omit when a citation stands alone.
 - **`location.snippet`** is for human display; do not over-truncate (do not cut the citation itself). For citations in footnotes, the snippet should be drawn from the footnote text and `location.footnote_id` set; `location.page` is the body page on which the footnote-reference appears.
 - **Critic-disagreement marker.** The `⚠ CRITIC DISAGREES` / `⚠ CRITIC UNAVAILABLE` markers in the Markdown report are derived from `critic.status` (`disagrees`/`partial` → disagreement marker; `unavailable` → unavailable marker). Do not duplicate them as separate fields.
+- **Statute and regulation entries.** `pincite.text` is populated from `lii_fetcher`'s `subsection_text` when the anchor matched, or from `section_text` when no subsection was cited. `pincite.match_tier_used` is `null` for statutes/regulations — there is no match ladder; the LII anchor is the locator. `source.courtlistener` is omitted; `source.lii` carries the fetch metadata. The brief_quote/actual_text/quote_match/match_phrase quartet behaves identically to the case side (see the Statutes and Regulations rubric in Stage 6 for the quotation-mark vs paraphrase rule).
 
 #### Determinism
 

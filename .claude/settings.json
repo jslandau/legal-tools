@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 plugins/legal-tools/skills/citation-toolkit/eyecite_extract.py:*)",
+      "Bash(python3 plugins/legal-tools/skills/citation-toolkit/lii_fetcher.py:*)",
+      "Bash(python3 plugins/legal-tools/skills/cite-checking/docx_extract.py:*)",
+      "Bash(python3 plugins/legal-tools/skills/cite-checking/assemble_html.py:*)"
+    ]
+  }
+}
