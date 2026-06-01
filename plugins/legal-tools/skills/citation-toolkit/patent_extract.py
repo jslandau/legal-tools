@@ -46,6 +46,15 @@ class Word(TypedDict):
     bottom: float
 
 
+class Line(TypedDict):
+    """A reconstructed printed line with column and line number tags."""
+    column: int                                         # printed column number (1-based, global)
+    line: int                                           # printed line number within the column
+    text: str
+    bbox: tuple[float, float, float, float]            # x0, top, x1, bottom
+    page_index: int                                     # 0-based source PDF page
+
+
 # Body pages carry hundreds of words; image/empty pages carry zero. A document
 # with a usable text layer has a substantial total across its pages.
 #
@@ -61,6 +70,10 @@ CENTER_BAND_FRAC = 0.06     # |word_center_x - page_center| < CENTER_BAND_FRAC *
 GUTTER_TOLERANCE = 3.0      # |word_center_x - gutter_x| <= GUTTER_TOLERANCE (tight refinement after gutter detection)
 MAX_PLAUSIBLE_LINE = 99     # reject center digit tokens above this (body-text numbers like 100/200/300)
 MIN_MARKERS_TO_FIT = 3      # need at least 3 distinct-x markers for a meaningful Theil-Sen fit
+
+# Column reconstruction (Phase 3)
+BASE_DEAD_ZONE = 6.0        # pt; minimum half-width of the gutter buffer (verified on born-digital)
+DEAD_ZONE_MARGIN = 3.0      # pt; added on top of the measured intra-page gutter drift
 
 _DIGITS = re.compile(r"\d{1,3}")
 
@@ -251,6 +264,57 @@ def max_marker_residual(markers: list[tuple[int, float]], pitch: float, intercep
     once produced spurious nonzero values while extraction was correct.
     """
     return max(abs(line - line_at(y, pitch, intercept)) for line, y in markers)
+
+
+def dead_zone_halfwidth(marker_xs: list[float]) -> float:
+    """Half-width of the gutter buffer. Covers the page's measured gutter drift.
+
+    On scans the gutter skews top-to-bottom (~4 pt observed); the marker tokens
+    reveal that drift directly via their center-x spread. We buffer the full
+    spread plus a margin, floored at BASE_DEAD_ZONE.
+    """
+    if not marker_xs:
+        return BASE_DEAD_ZONE
+    drift = max(marker_xs) - min(marker_xs)
+    return max(BASE_DEAD_ZONE, drift + DEAD_ZONE_MARGIN)
+
+
+def reconstruct_page(
+    page,                       # pdfplumber Page (for .crop / .extract_text_lines)
+    page_width: float,
+    page_height: float,
+    gutter: float,
+    marker_xs: list[float],
+    pitch: float,
+    intercept: float,
+    left_column: int,
+    right_column: int,
+    page_index: int,
+) -> list[Line]:
+    """Crop LEFT and RIGHT columns around the dead-zoned gutter, line-extract
+    each in isolation, drop the header band (predicted line < 1), and tag every
+    surviving line with its column and printed line number.
+    """
+    dz = dead_zone_halfwidth(marker_xs)
+    out: list[Line] = []
+    crops = (
+        (left_column, page.crop((0, 0, gutter - dz, page_height))),
+        (right_column, page.crop((gutter + dz, 0, page_width, page_height))),
+    )
+    for column, crop in crops:
+        for ln in crop.extract_text_lines():
+            yc = (ln["top"] + ln["bottom"]) / 2.0
+            line_no = line_at(yc, pitch, intercept)
+            if line_no < 1:
+                continue   # running header / column-number header band
+            out.append(Line(
+                column=column,
+                line=line_no,
+                text=ln["text"],
+                bbox=(ln["x0"], ln["top"], ln["x1"], ln["bottom"]),
+                page_index=page_index,
+            ))
+    return out
 
 
 def to_word(d: dict) -> Word:
