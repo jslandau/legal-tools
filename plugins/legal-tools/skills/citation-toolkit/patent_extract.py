@@ -28,6 +28,7 @@ Dependency: `pip install pdfplumber`. The script imports pdfplumber lazily so
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import TypedDict
@@ -52,6 +53,150 @@ class Word(TypedDict):
 # measures whether a single page is a dense two-column body page. Do not merge
 # the two — they answer different questions at different scopes.
 MIN_TOTAL_WORDS = 50
+
+
+# linemodel tuning. Derived empirically (2026-05-31) from both sample patents.
+CENTER_BAND_FRAC = 0.06     # |word_center_x - page_center| < CENTER_BAND_FRAC * page_width
+MAX_PLAUSIBLE_LINE = 99     # reject center digit tokens above this (body-text numbers like 100/200/300)
+MIN_MARKERS_TO_FIT = 3      # need at least 3 distinct-x markers for a meaningful Theil-Sen fit
+
+_DIGITS = re.compile(r"\d{1,3}")
+
+
+# ============================================================================
+# linemodel: Gutter detection and robust line model fitting
+# ============================================================================
+
+
+def _center_x(w: Word) -> float:
+    """Horizontal center of a word."""
+    return (w["x0"] + w["x1"]) / 2.0
+
+
+def _y_center(w: Word) -> float:
+    """Vertical center of a word."""
+    return (w["top"] + w["bottom"]) / 2.0
+
+
+def _marker_line(
+    w: Word,
+    page_width: float,
+    *,
+    band_frac: float = CENTER_BAND_FRAC,
+    max_line: int = MAX_PLAUSIBLE_LINE,
+) -> int | None:
+    """The gutter-marker line value this token represents, or None if it is not
+    a marker. THE single source of truth for marker-selection geometry — every
+    consumer (select_markers, marker_center_xs, gutter_x, the Phase 5
+    orchestrator) routes through this one predicate so the rule cannot drift.
+
+    A token is a marker iff it is: (a) pure digits, (b) within band_frac*width
+    of the page center, (c) a positive multiple of 5, (d) <= max_line (rejects
+    body-text numbers like 100/200/300 that happen to sit near the center).
+    """
+    t = w["text"].strip()
+    if not _DIGITS.fullmatch(t):
+        return None
+    if abs(_center_x(w) - page_width / 2.0) >= band_frac * page_width:
+        return None
+    v = int(t)
+    if v <= 0 or v > max_line or v % 5 != 0:
+        return None
+    return v
+
+
+def select_markers(
+    words: list[Word],
+    page_width: float,
+    *,
+    band_frac: float = CENTER_BAND_FRAC,
+    max_line: int = MAX_PLAUSIBLE_LINE,
+) -> list[tuple[int, float]]:
+    """Center-clustered multiple-of-5 line markers as (line, y_center) pairs.
+
+    Returns sorted, de-duplicated (line, y) pairs. Selection rule lives in
+    _marker_line (single source of truth).
+    """
+    out: dict[int, float] = {}
+    for w in words:
+        v = _marker_line(w, page_width, band_frac=band_frac, max_line=max_line)
+        if v is None:
+            continue
+        # If the same line value appears twice (rare OCR echo), keep the first
+        # (the band filter guarantees both echoes sit near center).
+        out.setdefault(v, _y_center(w))
+    return sorted(out.items())
+
+
+def marker_center_xs(
+    words: list[Word],
+    page_width: float,
+    *,
+    band_frac: float = CENTER_BAND_FRAC,
+    max_line: int = MAX_PLAUSIBLE_LINE,
+) -> list[float]:
+    """Center-x of every retained gutter-marker token (same _marker_line rule as
+    select_markers). Feeds the gutter median and the Phase 3 dead-zone.
+    """
+    return [
+        _center_x(w)
+        for w in words
+        if _marker_line(w, page_width, band_frac=band_frac, max_line=max_line) is not None
+    ]
+
+
+def gutter_x(words: list[Word], page_width: float, *, band_frac: float = CENTER_BAND_FRAC) -> float | None:
+    """Median center-x of the retained center digit tokens. None if none found.
+
+    Derived per page because the gutter drifts page-to-page (and slightly within
+    a page on scans — Phase 3 applies a dead-zone around this value).
+    """
+    import statistics
+    xs = marker_center_xs(words, page_width, band_frac=band_frac)
+    if not xs:
+        return None
+    return statistics.median(xs)
+
+
+def fit_line_model(markers: list[tuple[int, float]]) -> tuple[float, float] | None:
+    """Robust (pitch, intercept) for y = intercept + line*pitch via Theil-Sen.
+
+    pitch  = median of all pairwise slopes (y_j - y_i)/(line_j - line_i)
+    intercept = median of (y_i - pitch*line_i)
+    Returns None if fewer than MIN_MARKERS_TO_FIT distinct-line markers.
+    Tolerates missing markers and rejects outliers (29% breakdown point).
+    """
+    import statistics
+
+    pts = sorted(set(markers))
+    if len(pts) < MIN_MARKERS_TO_FIT:
+        return None
+    slopes = [
+        (pts[j][1] - pts[i][1]) / (pts[j][0] - pts[i][0])
+        for i in range(len(pts))
+        for j in range(i + 1, len(pts))
+        if pts[j][0] != pts[i][0]
+    ]
+    if not slopes:
+        return None
+    pitch = statistics.median(slopes)
+    intercept = statistics.median([y - pitch * line for line, y in pts])
+    return pitch, intercept
+
+
+def line_at(y: float, pitch: float, intercept: float) -> int:
+    """Inverse model: line number occupying vertical center y."""
+    return round((y - intercept) / pitch)
+
+
+def max_marker_residual(markers: list[tuple[int, float]], pitch: float, intercept: float) -> int:
+    """Largest |printed_line - predicted_line| over the markers. 0 == perfect.
+
+    This is the per-page self-validation signal (design's Self-validation note).
+    The function is tested independently because a buggy residual expression
+    once produced spurious nonzero values while extraction was correct.
+    """
+    return max(abs(line - line_at(y, pitch, intercept)) for line, y in markers)
 
 
 def to_word(d: dict) -> Word:
