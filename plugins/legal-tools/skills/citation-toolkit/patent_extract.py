@@ -119,7 +119,8 @@ def select_markers(
 
     Returns sorted, de-duplicated (line, y) pairs. Two-pass selection:
     1. Coarse band filter via _marker_line (operates from page center)
-    2. Tight gutter-relative refinement (rejects tokens > gutter_tolerance from detected gutter)
+    2. Tight gutter-relative refinement: identify the densest cluster of markers
+       (the true gutter), and retain only markers in that cluster.
 
     The gutter-relative pass is a second-pass refinement that does not change the
     _marker_line predicate itself, allowing Phase 5 and other consumers of _marker_line
@@ -139,16 +140,47 @@ def select_markers(
             candidates[v] = _y_center(w)
             candidate_xs[v] = _center_x(w)
 
-    # Pass 2: Gutter-relative refinement. Compute median gutter from all candidates,
-    # then reject any candidate whose center-x deviates by > gutter_tolerance.
+    # Pass 2: Gutter-relative refinement via density clustering.
+    # Instead of median-then-filter (which fails when candidates split evenly),
+    # group candidates into clusters and keep the densest cluster.
     if candidate_xs:
-        gutter = statistics.median(candidate_xs.values())
-        # Retain only markers within gutter_tolerance of the detected gutter
-        candidates = {
-            line: y
-            for line, y in candidates.items()
-            if abs(candidate_xs[line] - gutter) <= gutter_tolerance
-        }
+        xs_list = list(candidate_xs.values())
+        xs_sorted = sorted(xs_list)
+
+        # Cluster candidates: group xs where members are within gutter_tolerance of the cluster median
+        clusters: list[list[float]] = []
+        current_cluster: list[float] = []
+
+        for x in xs_sorted:
+            if current_cluster:
+                # Compute median of current cluster (with new x tentatively added)
+                test_cluster = current_cluster + [x]
+                test_median = statistics.median(test_cluster)
+                # Check if new x is within tolerance of cluster median
+                if abs(x - test_median) <= gutter_tolerance:
+                    current_cluster.append(x)
+                else:
+                    # Start a new cluster
+                    clusters.append(current_cluster)
+                    current_cluster = [x]
+            else:
+                # First element always starts the cluster
+                current_cluster.append(x)
+
+        if current_cluster:
+            clusters.append(current_cluster)
+
+        # Pick the densest cluster (largest membership; ties: leftmost/lowest x)
+        if clusters:
+            densest = max(clusters, key=lambda c: (len(c), -sum(c) / len(c)))
+            densest_median = statistics.median(densest)
+
+            # Retain only markers whose center-x is in the densest cluster
+            candidates = {
+                line: y
+                for line, y in candidates.items()
+                if abs(candidate_xs[line] - densest_median) <= gutter_tolerance
+            }
 
     return sorted(candidates.items())
 

@@ -129,6 +129,39 @@ class TestSelectMarkers:
         assert result[0][0] == 10
         assert result[0][1] == 155.0  # First occurrence
 
+    def test_select_markers_even_split_degenerate_case(self):
+        """Regression: even-split of markers into two clusters does not return [].
+
+        Previously, when candidate center-xs split roughly evenly into two clusters
+        (e.g. 2 markers at cx≈300 and 2 at cx≈335), Pass 2 would compute the median
+        as the midpoint (≈317.5), then filter to keep only markers within GUTTER_TOLERANCE=3.0.
+        ALL markers would fall outside the tolerance, and select_markers would return []
+        (silently discarding all markers instead of keeping the denser cluster).
+
+        This test builds a synthetic word list with an even split and confirms that
+        select_markers keeps the densest cluster instead of returning [].
+        """
+        from patent_extract import select_markers
+
+        # Two clusters: cx≈300 (lines 5, 10) and cx≈335 (lines 15, 20)
+        # Median would be (300 + 305 + 335 + 340) / 4 = 320, leaving all outside 3pt tolerance.
+        words = [
+            {"text": "5", "x0": 299.0, "x1": 301.0, "top": 100.0, "bottom": 110.0},    # cx≈300
+            {"text": "10", "x0": 304.0, "x1": 306.0, "top": 150.0, "bottom": 160.0},   # cx≈305
+            {"text": "15", "x0": 334.0, "x1": 336.0, "top": 200.0, "bottom": 210.0},   # cx≈335
+            {"text": "20", "x0": 339.0, "x1": 341.0, "top": 250.0, "bottom": 260.0},   # cx≈340
+        ]
+
+        result = select_markers(words, page_width=612.0)
+
+        # Should NOT return [] — must keep at least one cluster
+        assert len(result) > 0, "Even split should not discard all markers"
+
+        # Should keep the denser cluster (either one is acceptable if tied; typically the lower-cx one)
+        result_lines = {line for line, _ in result}
+        # Either {5, 10} or {15, 20} is acceptable, but NOT {}
+        assert result_lines in ({5, 10}, {15, 20}), f"Expected cluster {{5, 10}} or {{15, 20}}, got {result_lines}"
+
 
 class TestMarkerCenterXs:
     """Test extraction of center-x coordinates of retained markers."""
