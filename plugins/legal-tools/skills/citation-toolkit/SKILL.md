@@ -547,6 +547,54 @@ Or via stdin. The script is stdlib-only — no `pip install` required.
 
 ---
 
+## Patent column:line extraction
+
+US patent documents cite column and line numbers — e.g., `4:32-38` means column 4, lines 32–38 — to pinpoint passages in their specification. This skill provides tools to extract and query these citations locally without leaving the machine.
+
+### Build phase: `patent_extract.py`
+
+The extraction script reads a patent PDF with an embedded text layer and produces a structured JSON artifact mapping every printed line to its `(column, line)` coordinates. The script is local-only — the PDF never leaves your machine.
+
+```bash
+python3 plugins/legal-tools/skills/citation-toolkit/patent_extract.py build --input US9154231.pdf --out us9.json
+```
+
+Output: a `PatentDoc` JSON artifact with `lines` (each tagged with `column`, `line`, `text`, and `page_index`) and diagnostic `page_fits` (including per-page confidence signals like `max_marker_residual`). For high-confidence pages, this residual is `0` (perfect line alignment); pages flagged as non-body content have a residual of `−1`.
+
+**Dependency:** `pip install pdfplumber`. On PEP-668 systems (recent Linux distros), use a venv:
+```bash
+python3 -m venv .venv && .venv/bin/pip install pdfplumber
+.venv/bin/python plugins/legal-tools/skills/citation-toolkit/patent_extract.py build --input US9154231.pdf --out us9.json
+```
+
+### Query phase: `patent_query.py`
+
+Once you have an artifact, resolve column:line citations instantly using the query script — no PDF re-parsing, no network calls, pure local lookup.
+
+```bash
+# Single line
+python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 5:1
+
+# Span
+python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 4:32-38
+```
+
+Output: the joined printed text for the requested span on stdout. Errors (malformed citations, out-of-range column/line) go to stderr and produce exit code 1.
+
+The query script is stdlib-only — no dependencies beyond Python 3.
+
+### Architecture
+
+The build-once/query-many split is intentional. The geometric complexity (gutter detection, line-model fitting, per-page marker-residual confidence) lives in `patent_extract.py`. The query layer (`patent_query.py`) sees only the finalized artifact — it is a pure function over JSON, suitable for downstream consumption by cite-check without exposing linemodel internals.
+
+### Privacy and scope
+
+- **Local-only:** The PDF and extracted text never leave the machine. Both scripts run entirely offline.
+- **Confidence signals:** Each page's diagnostic includes `flagged` (boolean) and `flag_reason` (string), and the per-page `max_marker_residual` confidence metric. Use these to assess extraction confidence for your document before relying on its citations.
+- **Citation recognition:** Patent-cite recognition rules (determining when a string like `4:32-38` appears in text and signifying a column:line reference) are out of scope here. The cite-check skill will integrate those rules and consume these scripts' outputs.
+
+---
+
 ## Model Tiers for Subtasks
 
 Consuming skills dispatch many small subtasks in the course of a run. To control cost, delegate each subtask to the cheapest model that can reliably do it. The guidance below is shared across all consumers (`cite-checking`, `chain-cite`, `table-of-authorities`). Skills may override in specific cases but should justify the override.
