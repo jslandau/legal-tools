@@ -1,9 +1,14 @@
 """Shared pytest fixtures for citation-toolkit tests."""
+import sys
 from pathlib import Path
 
 import pytest
 
-FIXTURES = Path(__file__).resolve().parent.parent / "test_fixtures"
+# Add the parent directory to sys.path so imports work
+PARENT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PARENT_DIR))
+
+FIXTURES = PARENT_DIR / "test_fixtures"
 
 
 @pytest.fixture
