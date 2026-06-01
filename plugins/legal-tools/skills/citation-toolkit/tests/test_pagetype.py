@@ -75,6 +75,176 @@ class TestColumnMassFractions:
         assert abs(result[1] - 2.0/6.0) < 0.01  # Right ≈ 0.333
 
 
+class TestClassifyPageSyntheticUnit:
+    """Pure unit tests for classify_page with synthetic inputs (no PDF required)."""
+
+    def test_classify_page_single_column_branch(self):
+        """AC4.2 (IMPORTANT #1): single-column flag is reachable and tested.
+
+        Constructs synthetic inputs that reach the single-column branch:
+        - >= MIN_BODY_WORDS (400) words
+        - >= MIN_BODY_MARKERS (6) markers
+        - Valid fit tuple (pitch, intercept)
+        - Valid gutter float
+        - Nearly all words on the left side (center_x < 0.45*page_width)
+        - Left mass > 0.15 but right mass < MIN_COLUMN_MASS_FRAC (0.15)
+
+        Asserts flagged=True and "single-column" in flag_reason.
+        """
+        from patent_extract import classify_page, Word
+
+        page_width = 614.0
+
+        # Synthetic words: 450 total (>= MIN_BODY_WORDS=400)
+        # ~90% on left (cx < 0.45*614 = 276.3)
+        # ~10% on right (cx > 0.55*614 = 337.7)
+        # This gives left_mass ≈ 0.9, right_mass ≈ 0.1 (right < 0.15 threshold)
+        left_words = [
+            Word(text=f"word{i}", x0=100 + i*0.5, x1=130 + i*0.5, top=100 + i*2, bottom=110 + i*2)
+            for i in range(405)  # 405 words on left (90% of 450)
+        ]
+        right_words = [
+            Word(text=f"rword{i}", x0=400 + i*0.5, x1=430 + i*0.5, top=100 + i*2, bottom=110 + i*2)
+            for i in range(45)   # 45 words on right (10% of 450)
+        ]
+        words = left_words + right_words
+
+        # Synthetic markers: 6 total (>= MIN_BODY_MARKERS=6)
+        # Format: [(line_value, y_center), ...]
+        markers = [
+            (5, 100.0),
+            (10, 150.0),
+            (15, 200.0),
+            (20, 250.0),
+            (25, 300.0),
+            (30, 350.0),
+        ]
+
+        # Valid fit tuple (pitch, intercept)
+        fit = (10.0, 90.0)
+
+        # Valid gutter (center of page)
+        gutter = page_width / 2.0
+
+        # Call classify_page
+        page_fit = classify_page(
+            words=words,
+            page_width=page_width,
+            markers=markers,
+            fit=fit,
+            gutter=gutter,
+            page_index=0,
+            left_column=1,
+            right_column=2,
+        )
+
+        # Verify the test lands on the single-column branch (not sparse or insufficient-markers)
+        assert len(words) >= 400, f"Expected >= 400 words, got {len(words)}"
+        assert len(markers) >= 6, f"Expected >= 6 markers, got {len(markers)}"
+
+        # Verify flagged and reason
+        assert page_fit["flagged"] is True, (
+            f"Expected flagged=True. Words={len(words)}, Markers={len(markers)}, "
+            f"Reason={page_fit['flag_reason']}"
+        )
+        assert page_fit["flag_reason"] is not None
+        assert "single-column" in page_fit["flag_reason"], (
+            f"Expected 'single-column' in flag_reason, got: {page_fit['flag_reason']}"
+        )
+
+    def test_classify_page_sentinel_residual_no_fit(self):
+        """AC4.2 (IMPORTANT #2): -1 residual sentinel is set when fit is None.
+
+        The sentinel guards the contract that max_marker_residual is -1 when:
+        - fit is None, OR
+        - markers is empty
+
+        This test exercises the fit=None case. The page will be flagged due to
+        insufficient markers or other checks, but the residual must be -1.
+        """
+        from patent_extract import classify_page, Word
+
+        page_width = 614.0
+
+        # Create a valid word list (to avoid sparse page flag)
+        words = [
+            Word(text=f"word{i}", x0=100 + i*0.5, x1=130 + i*0.5, top=100 + i*2, bottom=110 + i*2)
+            for i in range(450)  # >= MIN_BODY_WORDS
+        ]
+
+        # Empty markers list (will trigger insufficient markers flag)
+        markers = []
+
+        # fit=None (will cause residual sentinel to be -1)
+        fit = None
+
+        # Valid gutter
+        gutter = page_width / 2.0
+
+        page_fit = classify_page(
+            words=words,
+            page_width=page_width,
+            markers=markers,
+            fit=fit,
+            gutter=gutter,
+            page_index=0,
+            left_column=1,
+            right_column=2,
+        )
+
+        # Verify flagged (due to insufficient markers)
+        assert page_fit["flagged"] is True, f"Expected flagged=True, got {page_fit}"
+        assert "insufficient gutter markers" in (page_fit["flag_reason"] or ""), (
+            f"Expected 'insufficient gutter markers' in reason, got: {page_fit['flag_reason']}"
+        )
+
+        # Verify the sentinel: max_marker_residual must be -1 (not a real residual)
+        assert page_fit["max_marker_residual"] == -1, (
+            f"Expected max_marker_residual=-1 (sentinel), got {page_fit['max_marker_residual']}"
+        )
+
+    def test_classify_page_sentinel_residual_empty_markers(self):
+        """AC4.2 (IMPORTANT #2): -1 residual sentinel is set when markers is empty.
+
+        Even with a valid fit, if markers is empty, the residual should be -1.
+        """
+        from patent_extract import classify_page, Word
+
+        page_width = 614.0
+
+        # Create a valid word list
+        words = [
+            Word(text=f"word{i}", x0=100 + i*0.5, x1=130 + i*0.5, top=100 + i*2, bottom=110 + i*2)
+            for i in range(450)
+        ]
+
+        # Empty markers
+        markers = []
+
+        # Valid fit
+        fit = (10.0, 90.0)
+
+        # Valid gutter
+        gutter = page_width / 2.0
+
+        page_fit = classify_page(
+            words=words,
+            page_width=page_width,
+            markers=markers,
+            fit=fit,
+            gutter=gutter,
+            page_index=0,
+            left_column=1,
+            right_column=2,
+        )
+
+        # The sentinel should still apply: empty markers means -1 residual
+        assert page_fit["max_marker_residual"] == -1, (
+            f"Expected max_marker_residual=-1 (sentinel for empty markers), "
+            f"got {page_fit['max_marker_residual']}"
+        )
+
+
 class TestClassifyPageIntegration:
     """Integration tests for classify_page using real PDF pages."""
 
@@ -159,7 +329,7 @@ class TestClassifyPageIntegration:
                 )
 
     def test_classify_us9154231_drawings_sparse_page(self, born_digital_pdf):
-        """AC4.2: US9154231 drawings (pages 2-4, indices 1-3) are flagged as 'sparse page'."""
+        """AC4.2: US9154231 drawings (pages 3-4, indices 2-3) are flagged as 'sparse page'."""
         import pdfplumber
         from patent_extract import (
             to_word, select_markers, gutter_x, fit_line_model,

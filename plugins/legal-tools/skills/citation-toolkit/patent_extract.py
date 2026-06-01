@@ -32,7 +32,7 @@ import re
 import statistics
 import sys
 from pathlib import Path
-from typing import TypedDict, NotRequired
+from typing import TypedDict
 
 
 # --- Source <-> Reconstruction seam -----------------------------------------
