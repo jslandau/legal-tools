@@ -183,41 +183,32 @@ def select_markers(
 ) -> list[tuple[int, float]]:
     """Center-clustered multiple-of-5 line markers as (line, y_center) pairs.
 
-    Returns sorted, de-duplicated (line, y) pairs. Two-pass selection:
+    Returns sorted, de-duplicated (line, y) pairs. Three-pass selection:
     1. Coarse band filter via _marker_line (operates from page center)
-    2. Tight gutter-relative refinement: identify the densest cluster of markers
-       (the true gutter), and retain only markers in that cluster.
+    2. Gutter clustering on FULL coarse-selected xs (before line deduping)
+    3. Dedupe by line value, keeping first occurrence within the gutter cluster
 
-    The gutter-relative pass is a second-pass refinement that does not change the
-    _marker_line predicate itself, allowing Phase 5 and other consumers of _marker_line
-    to remain independent. This dual-pass structure separates coarse per-token geometric
-    rules (band, digit, multiple-of-5) from page-level gutter-alignment robustness.
+    The unified three-pass structure ensures select_markers and marker_center_xs
+    operate on the same retained token set: both cluster on coarse_xs, then
+    select_markers dedupes by line within the cluster, while marker_center_xs
+    returns all xs in the cluster. This eliminates divergence.
     """
     # Pass 1: Coarse selection via _marker_line predicate (band_frac from page center)
-    candidates: dict[int, float] = {}
-    candidate_xs: dict[int, float] = {}  # Map line -> center_x (to track xs per line)
-    candidate_xs_list: list[float] = []  # All xs for gutter clustering
+    coarse_tokens: list[tuple[int, float, float]] = []  # (line_value, cx, yc)
     for w in words:
         v = _marker_line(w, page_width, band_frac=band_frac, max_line=max_line)
-        if v is None:
-            continue
-        # If the same line value appears twice (rare OCR echo), keep the first
-        # (the band filter guarantees both echoes sit near center).
-        if v not in candidates:
-            candidates[v] = _y_center(w)
-            cx = _center_x(w)
-            candidate_xs[v] = cx
-            candidate_xs_list.append(cx)
+        if v is not None:
+            coarse_tokens.append((v, _center_x(w), _y_center(w)))
 
-    # Pass 2: Gutter-relative refinement via density clustering
-    refined_xs = _filter_markers_by_gutter_cluster(candidate_xs_list, gutter_tolerance)
+    # Pass 2: Gutter clustering on the FULL list of coarse xs
+    coarse_xs = [cx for _, cx, _ in coarse_tokens]
+    refined_xs_set = _filter_markers_by_gutter_cluster(coarse_xs, gutter_tolerance)
 
-    # Retain only markers whose center-x is in the refined cluster
-    candidates = {
-        line: y
-        for line, y in candidates.items()
-        if candidate_xs[line] in refined_xs
-    }
+    # Pass 3: Dedupe by line, keeping first occurrence within refined cluster
+    candidates: dict[int, float] = {}
+    for line_val, cx, yc in coarse_tokens:
+        if cx in refined_xs_set and line_val not in candidates:
+            candidates[line_val] = yc
 
     return sorted(candidates.items())
 
@@ -232,29 +223,26 @@ def marker_center_xs(
 ) -> list[float]:
     """Center-x of every retained gutter-marker token, post-gutter-clustering.
 
-    Uses the same two-pass selection as select_markers:
+    Uses the same three-pass selection as select_markers:
     1. Coarse _marker_line filter (band_frac from page center)
-    2. Gutter-relative refinement to exclude outliers
+    2. Gutter clustering on FULL coarse xs
+    3. Return all xs within the refined cluster (preserves duplicates/multiples)
 
     Feeds gutter_x (median) and dead_zone_halfwidth (the spread).
-    Critical: must return the SAME set of xs that select_markers uses, so that
-    marker_center_xs' spread matches the gutter-clustered markers select_markers keeps.
+    Critical: uses the SAME clustering logic as select_markers so both operate
+    on the same retained token set.
     """
-    # Collect all coarse-selected xs AND their originating words/lines
+    # Pass 1: Coarse selection via _marker_line predicate
     coarse_xs = []
-    coarse_lines = []
     for w in words:
         v = _marker_line(w, page_width, band_frac=band_frac, max_line=max_line)
         if v is not None:
             coarse_xs.append(_center_x(w))
-            coarse_lines.append(v)
 
-    # Apply gutter-clustering refinement (same as select_markers)
-    # But preserve the per-token xs, only excluding xs from lines that are outliers
+    # Pass 2: Gutter clustering on the FULL coarse xs
     refined_xs_set = _filter_markers_by_gutter_cluster(coarse_xs, gutter_tolerance)
 
-    # Return all xs whose values are in the refined set
-    # This preserves duplicates (multiple tokens with same marker value at same x)
+    # Pass 3: Return all xs in the refined set (preserves duplicates)
     return [cx for cx in coarse_xs if cx in refined_xs_set]
 
 
@@ -316,10 +304,11 @@ def dead_zone_halfwidth(marker_xs: list[float]) -> float:
     reveal that drift directly via their center-x spread. We buffer the full
     spread plus a margin, floored at BASE_DEAD_ZONE.
 
-    Defense in depth: robust to outliers by excluding extreme values and computing
-    the spread from the central cluster. This protects against a single stray marker
-    that might escape the gutter-clustering refinement (though such escapes should be
-    rare after the shared _filter_markers_by_gutter_cluster call).
+    For robustness: trims one extreme from each end before computing spread.
+    For 1-2 points, uses the raw spread; for 3+ points, excludes the min and max.
+    This handles a single outlier while preserving the true drift. (Note: not
+    a full IQR implementation; the upstream gutter clustering already removes
+    outliers, so this is a lightweight secondary protection.)
     """
     if not marker_xs:
         return BASE_DEAD_ZONE
@@ -331,8 +320,7 @@ def dead_zone_halfwidth(marker_xs: list[float]) -> float:
         drift = max(marker_xs) - min(marker_xs)
         return max(BASE_DEAD_ZONE, drift + DEAD_ZONE_MARGIN)
 
-    # For 3+ points: use a robust approach: exclude the min and max,
-    # then compute drift from the remaining central points.
+    # For 3+ points: trim min and max, then compute drift from the remaining central points.
     # This handles the case of one outlier while preserving the true drift.
     sorted_xs = sorted(marker_xs)
     central = sorted_xs[1:-1]  # Exclude min and max
