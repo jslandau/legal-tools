@@ -314,9 +314,9 @@ class TestMaxMarkerResidual:
         pitch, intercept = 2.0, 90.0  # y = 90 + 2*line
 
         # For (15, 134.0): predicted line = (134 - 90) / 2 = 22, not 15
+        # Error is max(|5-5|, |10-10|, |15-22|) = 7
         residual = max_marker_residual(markers, pitch, intercept)
-        assert residual > 0
-        assert residual == max(abs(5 - 5), abs(10 - 10), abs(15 - 22))
+        assert residual == 7
 
     def test_max_marker_residual_detects_consistent_offset(self):
         """AC2.5: residual detects systematic prediction error."""
@@ -337,9 +337,9 @@ class TestLineModelIntegration:
     def test_born_digital_page_9_residual_zero(self, born_digital_pdf):
         """AC2.1: US9154231 page 9 fits with residual 0.
 
-        Note: page 9 has a misaligned line-5 marker (off by ~4 lines, likely body text).
-        Theil-Sen excludes this outlier from the fit. We validate by checking residual
-        on a cleaned marker set (line 5 removed).
+        Page 9 originally had a misaligned line-5 marker (center-x=342, gutter=303, 39pt off).
+        The gutter-relative refinement in select_markers now excludes this spurious token.
+        This test validates that the real pipeline (unmodified select_markers output) achieves residual 0.
         """
         from pathlib import Path
         import pdfplumber
@@ -361,11 +361,9 @@ class TestLineModelIntegration:
         # AC2.1: pitch ≈ 9.98 ± 0.05
         assert abs(pitch - 9.984) < 0.05, f"Expected pitch ~9.98, got {pitch}"
 
-        # AC2.1: residual == 0 on clean markers (excluding outlier line 5)
-        # Page 9 has a spurious/misaligned "5" (~4 lines off). Exclude it and check residual.
-        clean_markers = [(line, y) for line, y in markers if line != 5]
-        residual = max_marker_residual(clean_markers, pitch, intercept)
-        assert residual == 0, f"Expected residual 0 on clean markers, got {residual}"
+        # AC2.1: residual == 0 on UNMODIFIED select_markers output (no filtering needed)
+        residual = max_marker_residual(markers, pitch, intercept)
+        assert residual == 0, f"Expected residual 0, got {residual}"
 
     def test_ocr_page_2_residual_zero(self, ocr_pdf):
         """AC2.1: US4731298 page 2 fits with residual 0."""
@@ -393,8 +391,13 @@ class TestLineModelIntegration:
         assert abs(pitch - 9.552) < 0.05, f"Expected pitch ~9.55, got {pitch}"
 
     def test_born_digital_body_pages_pitch_stability(self, born_digital_pdf):
-        """AC2.4: Pitch is stable across body pages (pages 7-13)."""
+        """AC2.4: Pitch is stable across body pages (pages 7-13).
+
+        AC2.4 requires stability across a document's body pages, which means
+        we must fit at least 3 body pages to demonstrate the stability property.
+        """
         import pdfplumber
+        import statistics
         from patent_extract import to_word, select_markers, fit_line_model
 
         pitches = []
@@ -410,17 +413,22 @@ class TestLineModelIntegration:
                     pitch, _ = result
                     pitches.append(pitch)
 
-        # Should have several pitches
-        assert len(pitches) > 0, "Should extract pitches from body pages"
+        # AC2.4: must fit at least 3 body pages to test stability across pages
+        assert len(pitches) >= 3, f"Expected at least 3 fitted pages, got {len(pitches)}"
 
-        # All within ±0.05 of median
-        median_pitch = sorted(pitches)[len(pitches) // 2]
+        # All within ±0.05 of median (using statistics.median for correct even-count handling)
+        median_pitch = statistics.median(pitches)
         for pitch in pitches:
-            assert abs(pitch - median_pitch) < 0.05, f"Pitch {pitch} deviates from median {median_pitch}"
+            assert abs(pitch - median_pitch) <= 0.05, f"Pitch {pitch} deviates from median {median_pitch} by more than 0.05"
 
     def test_ocr_body_pages_pitch_stability(self, ocr_pdf):
-        """AC2.4: Pitch is stable across OCR body pages (pages 3-5)."""
+        """AC2.4: Pitch is stable across OCR body pages (pages 3-5).
+
+        AC2.4 requires stability across a document's body pages, which means
+        we must fit at least 3 body pages to demonstrate the stability property.
+        """
         import pdfplumber
+        import statistics
         from patent_extract import to_word, select_markers, fit_line_model
 
         pitches = []
@@ -436,13 +444,13 @@ class TestLineModelIntegration:
                     pitch, _ = result
                     pitches.append(pitch)
 
-        # Should have several pitches
-        assert len(pitches) > 0, "Should extract pitches from OCR body pages"
+        # AC2.4: must fit at least 3 body pages to test stability across pages
+        assert len(pitches) >= 3, f"Expected at least 3 fitted pages, got {len(pitches)}"
 
-        # All within ±0.05 of median
-        median_pitch = sorted(pitches)[len(pitches) // 2]
+        # All within ±0.05 of median (using statistics.median for correct even-count handling)
+        median_pitch = statistics.median(pitches)
         for pitch in pitches:
-            assert abs(pitch - median_pitch) < 0.05, f"Pitch {pitch} deviates from median {median_pitch}"
+            assert abs(pitch - median_pitch) <= 0.05, f"Pitch {pitch} deviates from median {median_pitch} by more than 0.05"
 
 
 class TestRobustnessAndMissingMarkers:

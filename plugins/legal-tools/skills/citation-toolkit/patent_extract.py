@@ -29,6 +29,7 @@ Dependency: `pip install pdfplumber`. The script imports pdfplumber lazily so
 import argparse
 import json
 import re
+import statistics
 import sys
 from pathlib import Path
 from typing import TypedDict
@@ -56,7 +57,8 @@ MIN_TOTAL_WORDS = 50
 
 
 # linemodel tuning. Derived empirically (2026-05-31) from both sample patents.
-CENTER_BAND_FRAC = 0.06     # |word_center_x - page_center| < CENTER_BAND_FRAC * page_width
+CENTER_BAND_FRAC = 0.06     # |word_center_x - page_center| < CENTER_BAND_FRAC * page_width (coarse band for initial selection)
+GUTTER_TOLERANCE = 3.0      # |word_center_x - gutter_x| <= GUTTER_TOLERANCE (tight refinement after gutter detection)
 MAX_PLAUSIBLE_LINE = 99     # reject center digit tokens above this (body-text numbers like 100/200/300)
 MIN_MARKERS_TO_FIT = 3      # need at least 3 distinct-x markers for a meaningful Theil-Sen fit
 
@@ -111,21 +113,44 @@ def select_markers(
     *,
     band_frac: float = CENTER_BAND_FRAC,
     max_line: int = MAX_PLAUSIBLE_LINE,
+    gutter_tolerance: float = GUTTER_TOLERANCE,
 ) -> list[tuple[int, float]]:
     """Center-clustered multiple-of-5 line markers as (line, y_center) pairs.
 
-    Returns sorted, de-duplicated (line, y) pairs. Selection rule lives in
-    _marker_line (single source of truth).
+    Returns sorted, de-duplicated (line, y) pairs. Two-pass selection:
+    1. Coarse band filter via _marker_line (operates from page center)
+    2. Tight gutter-relative refinement (rejects tokens > gutter_tolerance from detected gutter)
+
+    The gutter-relative pass is a second-pass refinement that does not change the
+    _marker_line predicate itself, allowing Phase 5 and other consumers of _marker_line
+    to remain independent. This dual-pass structure separates coarse per-token geometric
+    rules (band, digit, multiple-of-5) from page-level gutter-alignment robustness.
     """
-    out: dict[int, float] = {}
+    # Pass 1: Coarse selection via _marker_line predicate (band_frac from page center)
+    candidates: dict[int, float] = {}
+    candidate_xs: dict[int, float] = {}  # Track center-x for gutter refinement
     for w in words:
         v = _marker_line(w, page_width, band_frac=band_frac, max_line=max_line)
         if v is None:
             continue
         # If the same line value appears twice (rare OCR echo), keep the first
         # (the band filter guarantees both echoes sit near center).
-        out.setdefault(v, _y_center(w))
-    return sorted(out.items())
+        if v not in candidates:
+            candidates[v] = _y_center(w)
+            candidate_xs[v] = _center_x(w)
+
+    # Pass 2: Gutter-relative refinement. Compute median gutter from all candidates,
+    # then reject any candidate whose center-x deviates by > gutter_tolerance.
+    if candidate_xs:
+        gutter = statistics.median(candidate_xs.values())
+        # Retain only markers within gutter_tolerance of the detected gutter
+        candidates = {
+            line: y
+            for line, y in candidates.items()
+            if abs(candidate_xs[line] - gutter) <= gutter_tolerance
+        }
+
+    return sorted(candidates.items())
 
 
 def marker_center_xs(
@@ -151,7 +176,6 @@ def gutter_x(words: list[Word], page_width: float, *, band_frac: float = CENTER_
     Derived per page because the gutter drifts page-to-page (and slightly within
     a page on scans — Phase 3 applies a dead-zone around this value).
     """
-    import statistics
     xs = marker_center_xs(words, page_width, band_frac=band_frac)
     if not xs:
         return None
@@ -166,8 +190,6 @@ def fit_line_model(markers: list[tuple[int, float]]) -> tuple[float, float] | No
     Returns None if fewer than MIN_MARKERS_TO_FIT distinct-line markers.
     Tolerates missing markers and rejects outliers (29% breakdown point).
     """
-    import statistics
-
     pts = sorted(set(markers))
     if len(pts) < MIN_MARKERS_TO_FIT:
         return None
