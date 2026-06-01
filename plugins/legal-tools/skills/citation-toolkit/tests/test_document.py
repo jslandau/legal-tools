@@ -219,23 +219,33 @@ class TestLoadDocument:
         # Load back
         reloaded = load_document(out_path)
 
-        # Normalize both for comparison (bbox should be tuple)
+        # Normalize both for comparison: serialize through JSON like write_document does,
+        # then normalize bbox back to tuples like load_document does
         def normalize_doc(doc):
-            """Ensure all bboxes are tuples."""
-            for line in doc["lines"]:
+            """Serialize through JSON (which converts tuples to lists) and back,
+            then normalize bbox lists back to tuples to match load_document behavior."""
+            # Round-trip through JSON to match what write_document/load_document do
+            serialized = json.loads(json.dumps(doc))
+            # Normalize all bboxes to tuples like load_document does
+            for line in serialized["lines"]:
                 line["bbox"] = tuple(line["bbox"])
-            return doc
+            return serialized
 
-        original_normalized = normalize_doc(json.loads(json.dumps(original)))
+        original_normalized = normalize_doc(original)
         reloaded_normalized = normalize_doc(reloaded)
 
-        # Compare all fields
+        # Compare all fields with deep equality
         assert reloaded_normalized["patent_id"] == original_normalized["patent_id"]
         assert reloaded_normalized["source_path"] == original_normalized["source_path"]
         assert reloaded_normalized["source_sha256"] == original_normalized["source_sha256"]
         assert reloaded_normalized["has_text_layer"] == original_normalized["has_text_layer"]
-        assert len(reloaded_normalized["lines"]) == len(original_normalized["lines"])
-        assert len(reloaded_normalized["page_fits"]) == len(original_normalized["page_fits"])
+        # Deep equality: catch corrupted fields within lines, not just count
+        assert reloaded_normalized["lines"] == original_normalized["lines"], (
+            "lines deep equality failed: serialization may have corrupted a field"
+        )
+        assert reloaded_normalized["page_fits"] == original_normalized["page_fits"], (
+            "page_fits deep equality failed: serialization may have corrupted a field"
+        )
 
         # Verify bbox is tuple after load
         for line in reloaded["lines"]:

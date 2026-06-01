@@ -31,9 +31,11 @@ Dependency: `pip install pdfplumber`. The script imports pdfplumber lazily so
 import argparse
 import hashlib
 import json
+import os
 import re
 import statistics
 import sys
+import tempfile
 from pathlib import Path
 from typing import TypedDict
 
@@ -597,10 +599,36 @@ def build_document(pdf_path: Path) -> PatentDoc:
 
 
 def write_document(doc: PatentDoc, out_path: Path) -> None:
-    """Write PatentDoc to JSON file with trailing newline (house convention)."""
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(doc, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    """Write PatentDoc to JSON file with trailing newline (house convention).
+
+    Uses atomic write: writes to a temp file in the same directory, then
+    os.replace() to atomically move it into place. This prevents truncated
+    artifacts on crash mid-write.
+    """
+    out_path = Path(out_path)  # ensure Path object
+    # Create temp file in same directory for atomic os.replace()
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=out_path.parent,
+        delete=False,
+        encoding="utf-8",
+        suffix=".tmp",
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            json.dump(doc, tmp, ensure_ascii=False, indent=2)
+            tmp.write("\n")
+            tmp.flush()
+            os.fsync(tmp.fileno())  # ensure data is on disk before rename
+        except Exception:
+            # Clean up temp file on any error
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+            raise
+    # Atomic rename: tmp -> out_path (same filesystem)
+    os.replace(str(tmp_path), str(out_path))
 
 
 def load_document(path: Path) -> PatentDoc:
