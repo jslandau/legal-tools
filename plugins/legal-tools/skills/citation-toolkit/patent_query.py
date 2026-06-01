@@ -4,8 +4,11 @@ patent_query.py — pinpoint citation lookups against a PatentDoc artifact.
 
 Reads the JSON artifact produced by patent_extract.py (build-once/query-many)
 and resolves US patent column:line citations to their printed text. US patent
-citations pinpoint a span as "column:line" or "column:start-end" — e.g.
-"4:32-38" means column 4, lines 32 through 38.
+citations pinpoint a span as "column:line", "column:start-end" (same column),
+or "col:start-col2:end" (cross-column). Examples:
+  - "5:1" → column 5, line 1
+  - "5:1-3" → column 5, lines 1-3
+  - "4:65-5:3" → column 4 line 65 through column 5 line 3 (cross-column)
 
 Local only: reads a local artifact, makes no network calls.
 
@@ -14,8 +17,11 @@ Usage:
     # Single line:
     python3 patent_query.py --artifact us9154231.json --cite 5:1
 
-    # Span:
-    python3 patent_query.py --artifact us9154231.json --cite 4:32-38
+    # Same-column span:
+    python3 patent_query.py --artifact us9154231.json --cite 5:1-3
+
+    # Cross-column span:
+    python3 patent_query.py --artifact us9154231.json --cite 4:65-5:3
 
 Output: the resolved text on stdout. Errors go to stderr (exit non-zero).
 """
@@ -30,52 +36,137 @@ class CiteError(ValueError):
     """Malformed citation or out-of-range span."""
 
 
-_CITE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*(?:-\s*(\d+)\s*)?$")
+# Regex to parse citations:
+# Group 1: start column (required, \d+)
+# Group 2: start line (required, \d+)
+# Group 3: optional end column (before the second colon in "col:line-col:line")
+# Group 4: end line (may be present after hyphen, or inherit start column)
+#
+# Pattern: "col:line" or "col:start-end" or "col:start-col:end"
+# Captures:
+#   ^\s*(\d+)\s*:\s*(\d+)     — start col:line
+#   \s*(?:-                   — optional hyphen
+#     \s*(?:(\d+)\s*:)?       — optional end column (group 3) followed by colon
+#     (\d+)                   — end line (group 4)
+#   \s*)?$                    — end of string
+_CITE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*(?:-\s*(?:(\d+)\s*:)?(\d+)\s*)?$")
 
 
-def parse_cite(cite: str) -> tuple[int, int, int]:
-    """Parse 'col:line' or 'col:start-end' into (column, start_line, end_line).
+def parse_cite(cite: str) -> tuple[int, int, int, int]:
+    """Parse citation into (start_col, start_line, end_col, end_line).
 
-    A single-line cite 'c:n' yields (c, n, n). Raises CiteError if malformed
-    or if end < start.
+    A single-line cite 'c:n' yields (c, n, c, n).
+    A same-column span 'c:start-end' yields (c, start, c, end).
+    A cross-column span 'c1:start-c2:end' yields (c1, start, c2, end).
+
+    Whitespace tolerated around numbers/colons/hyphen.
+    Raises CiteError if malformed or if (end_col, end_line) lexicographically
+    precedes (start_col, start_line).
     """
     m = _CITE.match(cite)
     if not m:
-        raise CiteError(f"malformed citation: {cite!r} (expected 'col:line' or 'col:start-end')")
-    column = int(m.group(1))
-    start = int(m.group(2))
-    end = int(m.group(3)) if m.group(3) is not None else start
-    if end < start:
-        raise CiteError(f"citation end line {end} precedes start line {start}: {cite!r}")
-    return column, start, end
+        raise CiteError(f"malformed citation: {cite!r} (expected 'col:line', 'col:start-end', or 'col:start-col:end')")
+
+    start_col = int(m.group(1))
+    start_line = int(m.group(2))
+
+    # If hyphen is present, parse end col and end line
+    if m.group(4) is not None:
+        # End line is present (group 4)
+        end_line = int(m.group(4))
+        # End column: group 3 if present, else inherit start_col
+        end_col = int(m.group(3)) if m.group(3) is not None else start_col
+    else:
+        # No hyphen: single line cite
+        end_col = start_col
+        end_line = start_line
+
+    # Validate: (end_col, end_line) must not precede (start_col, start_line) lexicographically
+    if (end_col, end_line) < (start_col, start_line):
+        raise CiteError(
+            f"citation end ({end_col}:{end_line}) precedes start ({start_col}:{start_line}): {cite!r}"
+        )
+
+    return start_col, start_line, end_col, end_line
 
 
-def lookup(doc: dict, column: int, start_line: int, end_line: int) -> str:
-    """Joined printed text for column, lines start_line..end_line inclusive.
+def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: int) -> str:
+    """Joined printed text for a citation span (same-column or cross-column).
 
-    Raises CiteError if the column is absent or any requested line is missing.
+    Reading order:
+    - start_col: lines start_line .. max_line(start_col)
+    - each intermediate column c in (start_col+1 .. end_col-1): lines 1 .. max_line(c)
+    - end_col: lines 1 .. end_line
+
+    If start_col == end_col, just lines start_line..end_line of that column.
+
+    Raises CiteError if any referenced column is absent or any required line is missing.
     """
-    by_line = {
-        ln["line"]: ln["text"]
-        for ln in doc["lines"]
-        if ln["column"] == column
-    }
-    if not by_line:
-        raise CiteError(f"column {column} not present in artifact")
-    missing = [n for n in range(start_line, end_line + 1) if n not in by_line]
-    if missing:
-        raise CiteError(f"column {column}: line(s) {missing} not present")
-    return "\n".join(by_line[n] for n in range(start_line, end_line + 1))
+    # Build a per-column {line: text} index
+    by_column = {}
+    for ln in doc["lines"]:
+        col = ln["column"]
+        line_num = ln["line"]
+        if col not in by_column:
+            by_column[col] = {}
+        by_column[col][line_num] = ln["text"]
+
+    lines_to_join = []
+
+    # Special case: same column
+    if start_col == end_col:
+        if start_col not in by_column:
+            raise CiteError(f"column {start_col} not present in artifact")
+        col_lines = by_column[start_col]
+        missing = [n for n in range(start_line, end_line + 1) if n not in col_lines]
+        if missing:
+            raise CiteError(f"column {start_col}: line(s) {missing} not present")
+        for ln in range(start_line, end_line + 1):
+            lines_to_join.append(col_lines[ln])
+    else:
+        # Cross-column: start_col -> max, intermediates -> all, end_col -> 1..end_line
+        # Start column: start_line to max_line
+        if start_col not in by_column:
+            raise CiteError(f"column {start_col} not present in artifact")
+        col_lines = by_column[start_col]
+        max_start_line = max(col_lines.keys())
+        for ln in range(start_line, max_start_line + 1):
+            if ln not in col_lines:
+                raise CiteError(f"column {start_col}: line {ln} not present")
+            lines_to_join.append(col_lines[ln])
+
+        # Intermediate columns: 1 to max_line
+        for col in range(start_col + 1, end_col):
+            if col not in by_column:
+                raise CiteError(f"column {col} not present in artifact")
+            col_lines = by_column[col]
+            max_col_line = max(col_lines.keys())
+            for ln in range(1, max_col_line + 1):
+                if ln not in col_lines:
+                    raise CiteError(f"column {col}: line {ln} not present")
+                lines_to_join.append(col_lines[ln])
+
+        # End column: 1 to end_line
+        if end_col not in by_column:
+            raise CiteError(f"column {end_col} not present in artifact")
+        col_lines = by_column[end_col]
+        for ln in range(1, end_line + 1):
+            if ln not in col_lines:
+                raise CiteError(f"column {end_col}: line {ln} not present")
+            lines_to_join.append(col_lines[ln])
+
+    return "\n".join(lines_to_join)
 
 
 def lookup_cite(doc: dict, cite: str) -> str:
+    """Resolve a citation string to text."""
     return lookup(doc, *parse_cite(cite))
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--artifact", required=True, type=Path, help="PatentDoc JSON path")
-    parser.add_argument("--cite", required=True, help="Citation, e.g. 4:32-38")
+    parser.add_argument("--cite", required=True, help="Citation, e.g. 5:1, 5:1-3, or 4:65-5:3")
     args = parser.parse_args(argv)
 
     if not args.artifact.exists():

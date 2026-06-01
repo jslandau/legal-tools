@@ -569,17 +569,20 @@ python3 -m venv .venv && .venv/bin/pip install pdfplumber
 
 ### Query phase: `patent_query.py`
 
-Once you have an artifact, resolve column:line citations instantly using the query script — no PDF re-parsing, no network calls, pure local lookup.
+Once you have an artifact, resolve column:line citations instantly using the query script — no PDF re-parsing, no network calls, pure local lookup. The query script supports single-line citations, same-column spans, and cross-column spans (reading across gutter boundaries).
 
 ```bash
 # Single line
 python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 5:1
 
-# Span
+# Same-column span (column 4, lines 32 through 38)
 python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 4:32-38
+
+# Cross-column span (column 4 line 65 through column 5 line 3)
+python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 4:65-5:3
 ```
 
-Output: the joined printed text for the requested span on stdout. Errors (malformed citations, out-of-range column/line) go to stderr and produce exit code 1.
+Output: the joined printed text for the requested span on stdout, with lines separated by newline. Cross-column citations read in document order: start column from start_line to its max_line, each intermediate column 1 to its max_line, then end column from 1 to end_line. Errors (malformed citations, out-of-range column/line) go to stderr and produce exit code 1.
 
 The query script is stdlib-only — no dependencies beyond Python 3.
 
