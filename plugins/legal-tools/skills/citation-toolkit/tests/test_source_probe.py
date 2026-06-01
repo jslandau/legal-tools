@@ -5,6 +5,46 @@ from pathlib import Path
 import pytest
 
 
+class TestToWord:
+    """Unit tests for the pdfplumber dict → Word TypedDict projection."""
+
+    def test_to_word_narrows_dict_to_word_keys(self):
+        """to_word() projects a pdfplumber dict to exactly Word keys with float coercion."""
+        from patent_extract import to_word
+
+        # Simulate a pdfplumber word dict with extra keys beyond the seam
+        pdfplumber_dict = {
+            "text": "hello",
+            "x0": 10,
+            "x1": 50,
+            "top": 20,
+            "bottom": 30,
+            "mcid": 0,  # Extra pdfplumber field
+            "tag": None,  # Extra pdfplumber field
+        }
+
+        result = to_word(pdfplumber_dict)
+
+        # Assert exact Word keys only
+        assert set(result.keys()) == {"text", "x0", "x1", "top", "bottom"}
+
+        # Assert correct values
+        assert result["text"] == "hello"
+        assert result["x0"] == 10.0
+        assert result["x1"] == 50.0
+        assert result["top"] == 20.0
+        assert result["bottom"] == 30.0
+
+        # Assert numeric fields are floats
+        assert isinstance(result["x0"], float)
+        assert isinstance(result["x1"], float)
+        assert isinstance(result["top"], float)
+        assert isinstance(result["bottom"], float)
+
+        # Assert text field is str
+        assert isinstance(result["text"], str)
+
+
 class TestHasTextLayer:
     """Pure-function unit tests for the text-layer detection decision."""
 
