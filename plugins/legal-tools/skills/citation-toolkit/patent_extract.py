@@ -32,7 +32,7 @@ import re
 import statistics
 import sys
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, NotRequired
 
 
 # --- Source <-> Reconstruction seam -----------------------------------------
@@ -55,6 +55,18 @@ class Line(TypedDict):
     page_index: int                                     # 0-based source PDF page
 
 
+class PageFit(TypedDict):
+    """Diagnostic for page-type classification (Phase 4)."""
+    page_index: int
+    left_column: int
+    right_column: int
+    gutter_x: float
+    pitch: float
+    max_marker_residual: int
+    flagged: bool
+    flag_reason: str | None
+
+
 # Body pages carry hundreds of words; image/empty pages carry zero. A document
 # with a usable text layer has a substantial total across its pages.
 #
@@ -74,6 +86,12 @@ MIN_MARKERS_TO_FIT = 3      # need at least 3 distinct-x markers for a meaningfu
 # Column reconstruction (Phase 3)
 BASE_DEAD_ZONE = 6.0        # pt; minimum half-width of the gutter buffer (verified on born-digital)
 DEAD_ZONE_MARGIN = 3.0      # pt; added on top of the measured intra-page gutter drift
+
+# Page-type classification (Phase 4)
+MIN_BODY_WORDS = 400        # below this, not a dense two-column body page
+MIN_BODY_MARKERS = 6        # need a fittable marker set (gutter-token presence)
+MIN_COLUMN_MASS_FRAC = 0.15 # each side must hold at least this fraction of words (else single-column)
+SIDE_SPLIT_FRAC = 0.45      # words with center-x < 0.45*W are "left"; > 0.55*W are "right"
 
 _DIGITS = re.compile(r"\d{1,3}")
 
@@ -388,6 +406,69 @@ def reconstruct_page(
                 page_index=page_index,
             ))
     return out
+
+
+def column_mass_fractions(words: list[Word], page_width: float) -> tuple[float, float]:
+    """Fraction of words whose center-x falls clearly left vs. clearly right.
+
+    Left: center-x < SIDE_SPLIT_FRAC * page_width
+    Right: center-x > (1 - SIDE_SPLIT_FRAC) * page_width
+    Center band: in between (ignored)
+
+    Pure function, no side effects.
+    """
+    n = len(words)
+    if n == 0:
+        return 0.0, 0.0
+    left = sum(1 for w in words if _center_x(w) < SIDE_SPLIT_FRAC * page_width)
+    right = sum(1 for w in words if _center_x(w) > (1 - SIDE_SPLIT_FRAC) * page_width)
+    return left / n, right / n
+
+
+def classify_page(
+    words: list[Word],
+    page_width: float,
+    markers: list[tuple[int, float]],
+    fit: tuple[float, float] | None,
+    gutter: float | None,
+    page_index: int,
+    left_column: int,
+    right_column: int,
+) -> PageFit:
+    """Build the PageFit diagnostic, flagging non-body pages with a reason.
+
+    A page is a clean two-column body page only if it has enough words, a
+    fittable marker set, and both column masses populated. Any failure flags
+    the page (it is NOT extracted as body content downstream).
+
+    Pure function, no side effects. No pdfplumber required.
+    """
+    reason: str | None = None
+    if len(words) < MIN_BODY_WORDS:
+        reason = f"sparse page ({len(words)} words) — likely drawing or front matter"
+    elif len(markers) < MIN_BODY_MARKERS or fit is None or gutter is None:
+        reason = f"insufficient gutter markers ({len(markers)}) — not a numbered body page"
+    else:
+        lf, rf = column_mass_fractions(words, page_width)
+        if lf < MIN_COLUMN_MASS_FRAC or rf < MIN_COLUMN_MASS_FRAC:
+            reason = f"single-column / full-width content (mass L={lf:.2f} R={rf:.2f})"
+
+    flagged = reason is not None
+    pitch = fit[0] if fit else 0.0
+    # Sentinel: -1 means "no fit / not applicable" (the page could not be
+    # fitted), distinct from a real residual where 0 == perfect. Consumers must
+    # treat negative residuals as "no measurement", never as a fit quality.
+    residual = max_marker_residual(markers, *fit) if (fit and markers) else -1
+    return PageFit(
+        page_index=page_index,
+        left_column=left_column,
+        right_column=right_column,
+        gutter_x=gutter if gutter is not None else 0.0,
+        pitch=pitch,
+        max_marker_residual=residual,
+        flagged=flagged,
+        flag_reason=reason,
+    )
 
 
 def to_word(d: dict) -> Word:
