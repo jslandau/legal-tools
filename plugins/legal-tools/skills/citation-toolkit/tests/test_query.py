@@ -180,63 +180,78 @@ class TestLookup:
         assert text == expected
 
     def test_ac6_2_cross_column_span_us9(self, us9_artifact: dict):
-        """AC6.2 (NEW): lookup_cite with cross-column span reads in document order.
+        """AC6.2 (NEW): lookup_cite with cross-column span (adjacent columns) reads in document order.
 
-        Reading order: all lines in start_col from start_line to max_line(start_col),
-        then each intermediate column 1..max_line, then end_col from 1..end_line.
+        For US9154231, columns 5 and 6 are both gap-free (no missing lines 1..max).
+        This test spans from the end of column 5 to an early line in column 6,
+        using the adjacent-column form (start_col:max-end_col:end_line) with no
+        intermediate columns in the span. This exercises the cross-column reading
+        order without requiring gap-free intermediate columns.
         """
         from patent_query import lookup_cite
 
-        # Find a pair of adjacent columns with lines to span across
-        columns_present = sorted(set(line["column"] for line in us9_artifact["lines"]))
-        if len(columns_present) < 2:
-            pytest.skip("Need at least 2 columns for cross-column test")
+        # Columns 5 and 6 are both gap-free with max_line 67
+        start_col = 5
+        end_col = 6
+        start_line = 67  # Last line of column 5
+        end_line = 1    # First line of column 6
 
-        # Pick columns 3 and 4 (or first two available)
-        start_col = columns_present[0]
-        end_col = columns_present[1]
+        # Get the individual lines
+        start_line_text = lookup_cite(us9_artifact, f"{start_col}:{start_line}")
+        end_line_text = lookup_cite(us9_artifact, f"{end_col}:{end_line}")
 
-        # Get max line of start_col
-        max_start_col_line = max(
-            line["line"] for line in us9_artifact["lines"] if line["column"] == start_col
+        # Expected: just these two lines joined
+        expected = f"{start_line_text}\n{end_line_text}"
+
+        # Test the cross-column cite
+        cite = f"{start_col}:{start_line}-{end_col}:{end_line}"
+        text = lookup_cite(us9_artifact, cite)
+
+        assert text == expected, (
+            f"Cross-column span {cite} should join col 5 line 67 + col 6 line 1; "
+            f"got {text!r}"
         )
 
-        # Get a line in the end column
-        end_line = 2  # arbitrary, just needs to exist
-        try:
-            # Build cite: start_col:max_start_col_line - end_col:end_line
-            cite = f"{start_col}:{max_start_col_line}-{end_col}:{end_line}"
-            text = lookup_cite(us9_artifact, cite)
+    def test_ac6_2_intermediate_column_gap_raises_cite_error(self, us9_artifact: dict):
+        """NEW TEST: Cross-column span with gappy intermediate column raises CiteError naming the missing line.
 
-            # Manually build expected text
-            lines_to_join = []
+        For US9154231, column 3 has gaps at lines [13, 33, 50, 52]. This test spans from
+        column 2 (gap-free) through column 3 (gappy) to column 5 (gap-free), ensuring
+        the intermediate-column reading order detects the gap and raises CiteError.
 
-            # Lines from start_col: start_line to max_line
-            for ln in range(max_start_col_line, max_start_col_line + 1):
-                line_text = lookup_cite(us9_artifact, f"{start_col}:{ln}")
-                lines_to_join.append(line_text)
+        The test computes the first missing line in column 3 programmatically and
+        asserts it appears in the error message.
+        """
+        from patent_query import lookup_cite, CiteError
 
-            # Lines from intermediate columns (if any): 1 to max_line
-            for col in columns_present:
-                if start_col < col < end_col:
-                    max_col_line = max(
-                        line["line"] for line in us9_artifact["lines"] if line["column"] == col
-                    )
-                    for ln in range(1, max_col_line + 1):
-                        line_text = lookup_cite(us9_artifact, f"{col}:{ln}")
-                        lines_to_join.append(line_text)
+        # Span: 2:67-5:1 (start col 2, end col 5, intermediates 3,4)
+        # Column 3 is gappy; find its first missing line
+        lines_in_col3 = sorted([
+            line["line"] for line in us9_artifact["lines"] if line["column"] == 3
+        ])
+        max_col3 = max(lines_in_col3)
 
-            # Lines from end_col: 1 to end_line
-            for ln in range(1, end_line + 1):
-                line_text = lookup_cite(us9_artifact, f"{end_col}:{ln}")
-                lines_to_join.append(line_text)
+        # Compute first missing line in range 1..max_col3
+        first_missing = None
+        for n in range(1, max_col3 + 1):
+            if n not in lines_in_col3:
+                first_missing = n
+                break
 
-            expected = "\n".join(lines_to_join)
-            assert text == expected
+        assert first_missing is not None, "Column 3 should have at least one gap"
 
-        except Exception:
-            # If the exact cite doesn't work, that's OK for now; test the structure exists
-            pass
+        # Attempt the cross-column cite
+        cite = "2:67-5:1"
+
+        with pytest.raises(CiteError) as exc_info:
+            lookup_cite(us9_artifact, cite)
+
+        error_message = str(exc_info.value)
+        # Error message should name column 3 and the missing line
+        assert "3" in error_message, f"Error should mention column 3: {error_message}"
+        assert str(first_missing) in error_message, (
+            f"Error should name the missing line {first_missing} in column 3: {error_message}"
+        )
 
     def test_ac6_3_column_absent(self, us9_artifact: dict):
         """AC6.3: lookup_cite(doc, '999:1') raises CiteError (column absent)."""
@@ -279,16 +294,24 @@ class TestBoundaryAndCrossSample:
         from patent_query import lookup_cite
 
         text = lookup_cite(us9_artifact, "1:1")
-        assert text is not None
-        assert len(text) > 0
+        # Assert exact text (get the known first line from artifact)
+        expected = next(
+            line["text"] for line in us9_artifact["lines"]
+            if line["column"] == 1 and line["line"] == 1
+        )
+        assert text == expected
 
     def test_boundary_first_line_first_column_us4(self, us4_artifact: dict):
         """Boundary: query 1:2 (first line present in column 1) on US4731298."""
         from patent_query import lookup_cite
 
         text = lookup_cite(us4_artifact, "1:2")
-        assert text is not None
-        assert len(text) > 0
+        # Assert exact text from artifact
+        expected = next(
+            line["text"] for line in us4_artifact["lines"]
+            if line["column"] == 1 and line["line"] == 2
+        )
+        assert text == expected
 
     def test_boundary_last_line_us9(self, us9_artifact: dict):
         """Boundary: query the last line of a column on US9154231."""
@@ -302,8 +325,12 @@ class TestBoundaryAndCrossSample:
         )
 
         text = lookup_cite(us9_artifact, f"1:{max_line}")
-        assert text is not None
-        assert len(text) > 0
+        # Assert exact text from artifact
+        expected = next(
+            line["text"] for line in us9_artifact["lines"]
+            if line["column"] == 1 and line["line"] == max_line
+        )
+        assert text == expected
 
     def test_boundary_last_line_us4(self, us4_artifact: dict):
         """Boundary: query the last line of a column on US4731298."""
@@ -317,24 +344,40 @@ class TestBoundaryAndCrossSample:
         )
 
         text = lookup_cite(us4_artifact, f"1:{max_line}")
-        assert text is not None
-        assert len(text) > 0
+        # Assert exact text from artifact
+        expected = next(
+            line["text"] for line in us4_artifact["lines"]
+            if line["column"] == 1 and line["line"] == max_line
+        )
+        assert text == expected
 
     def test_cross_sample_single_query_us4(self, us4_artifact: dict):
         """Cross-sample: single-line queries work on US4731298 artifact."""
         from patent_query import lookup_cite
 
         text = lookup_cite(us4_artifact, "2:2")
-        assert text is not None
-        assert len(text) > 0
+        # Assert exact text from artifact
+        expected = next(
+            line["text"] for line in us4_artifact["lines"]
+            if line["column"] == 2 and line["line"] == 2
+        )
+        assert text == expected
 
     def test_cross_sample_span_query_us4(self, us4_artifact: dict):
         """Cross-sample: span queries work on US4731298 artifact."""
         from patent_query import lookup_cite
 
         text = lookup_cite(us4_artifact, "2:2-5")
-        assert text is not None
-        assert "\n" in text, "Span should have multiple lines"
+        # Assert exact text: lines 2-5 of column 2
+        expected_lines = []
+        for ln in range(2, 6):  # 2, 3, 4, 5
+            line_text = next(
+                line["text"] for line in us4_artifact["lines"]
+                if line["column"] == 2 and line["line"] == ln
+            )
+            expected_lines.append(line_text)
+        expected = "\n".join(expected_lines)
+        assert text == expected, f"Span 2:2-5 should join lines 2-5 of column 2"
 
     def test_whole_span_equals_concatenation_us9(self, us9_artifact: dict):
         """Whole-span concatenation: query full contiguous span equals joining all lines."""
@@ -410,46 +453,32 @@ class TestBoundaryAndCrossSample:
             assert full_span == expected
 
     def test_cross_column_whole_span_sanity_us9(self, us9_artifact: dict):
-        """Cross-column whole-span sanity: span start_col full + intermediates + end_col partial."""
-        from patent_query import lookup_cite, CiteError
+        """Cross-column whole-span sanity: span start_col full + end_col partial.
 
-        # Find two adjacent columns with lines
-        columns_present = sorted(set(line["column"] for line in us9_artifact["lines"]))
-        if len(columns_present) < 2:
-            pytest.skip("Need at least 2 columns")
+        For US9154231, columns 5 and 6 are both gap-free.
+        Span from end of column 5 (line 67) to middle of column 6 (line 10).
+        This tests the reading order: start_col:67..67, end_col:1..10.
+        """
+        from patent_query import lookup_cite
 
-        start_col = columns_present[0]
-        end_col = columns_present[1]
+        start_col = 5
+        end_col = 6
+        max_start_col = 67  # Column 5 has max line 67
+        end_line = 10      # End at line 10 of column 6
 
-        # Get max line of start_col
-        max_start_col = max(
-            line["line"] for line in us9_artifact["lines"] if line["column"] == start_col
-        )
+        # Build expected text: line 67 of col 5, then lines 1-10 of col 6
+        expected_lines = []
+        expected_lines.append(lookup_cite(us9_artifact, f"{start_col}:{max_start_col}"))
+        for ln in range(1, end_line + 1):
+            expected_lines.append(lookup_cite(us9_artifact, f"{end_col}:{ln}"))
 
-        # Pick an end_line in end_col (1, 2, or 3 if they exist)
-        try:
-            # Try to use line 2 of end column
-            _ = lookup_cite(us9_artifact, f"{end_col}:2")
-            end_line = 2
-        except CiteError:
-            pytest.skip(f"End column {end_col} doesn't have line 2")
+        expected = "\n".join(expected_lines)
 
         # Build the cross-column cite
         cite = f"{start_col}:{max_start_col}-{end_col}:{end_line}"
+        result_text = lookup_cite(us9_artifact, cite)
 
-        try:
-            result_text = lookup_cite(us9_artifact, cite)
-
-            # Manually build expected: start_col from max_start_col to max_start_col
-            # (just that one line if it's the span), plus end_col from 1 to end_line
-            expected_lines = []
-            for ln in range(max_start_col, max_start_col + 1):
-                expected_lines.append(lookup_cite(us9_artifact, f"{start_col}:{ln}"))
-            for ln in range(1, end_line + 1):
-                expected_lines.append(lookup_cite(us9_artifact, f"{end_col}:{ln}"))
-
-            expected = "\n".join(expected_lines)
-            assert result_text == expected
-        except CiteError:
-            # If the cite doesn't resolve, that's also acceptable (boundary case)
-            pass
+        assert result_text == expected, (
+            f"Cross-column span {cite} should join col 5 line 67 + col 6 lines 1-10; "
+            f"got {result_text!r}"
+        )

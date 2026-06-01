@@ -102,7 +102,9 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
 
     Raises CiteError if any referenced column is absent or any required line is missing.
     """
-    # Build a per-column {line: text} index
+    # Build a per-column {line: text} index for this lookup.
+    # Per-call rebuild is intentional for current build-once/query-occasionally usage;
+    # if cite-check batches many lookups, memoizing this index is the optimization.
     by_column = {}
     for ln in doc["lines"]:
         col = ln["column"]
