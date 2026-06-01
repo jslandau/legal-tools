@@ -12,21 +12,24 @@ Extraction is entirely local — the PDF and its text never leave the machine,
 consistent with the legal-tools confidentiality posture (see citation-toolkit
 SKILL.md). pdfplumber reads the embedded text layer; no content is transmitted.
 
-This phase implements the `probe` subcommand only (text-layer detection).
-Later phases add `build` (full artifact assembly).
+This phase implements the `probe` subcommand and `build` (full artifact assembly).
 
 Usage:
 
     # Report whether a PDF has a usable text layer, with per-page word counts:
     python3 patent_extract.py probe --input US9154231.pdf
 
-Output: JSON on stdout. Informational messages and errors go to stderr.
+    # Build a PatentDoc JSON artifact:
+    python3 patent_extract.py build --input US9154231.pdf --out artifact.json
+
+Output: JSON on stdout (or to file). Informational messages and errors go to stderr.
 
 Dependency: `pip install pdfplumber`. The script imports pdfplumber lazily so
 `--help` works without the dependency installed. On PEP-668 systems use a venv:
 `python3 -m venv .venv && .venv/bin/pip install pdfplumber`.
 """
 import argparse
+import hashlib
 import json
 import re
 import statistics
@@ -65,6 +68,16 @@ class PageFit(TypedDict):
     max_marker_residual: int
     flagged: bool
     flag_reason: str | None
+
+
+class PatentDoc(TypedDict):
+    """Complete reconstructed patent document with lines and diagnostics."""
+    patent_id: str
+    source_path: str
+    source_sha256: str
+    has_text_layer: bool
+    lines: list[Line]
+    page_fits: list[PageFit]
 
 
 # Body pages carry hundreds of words; image/empty pages carry zero. A document
@@ -511,12 +524,122 @@ def probe(pdf_path: Path) -> dict:
     }
 
 
+# ============================================================================
+# Document orchestration and persistence (Phase 5)
+# ============================================================================
+
+
+def sha256_file(path: Path) -> str:
+    """SHA256 hash of a file's contents as a 64-char hex string."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def build_document(pdf_path: Path) -> PatentDoc:
+    """Parse the PDF once into a PatentDoc. Lazy-imports pdfplumber.
+
+    Running column counter advances only for body (non-flagged) pages,
+    so drawing/front-matter pages do not consume column numbers.
+    """
+    import pdfplumber
+
+    lines: list[Line] = []
+    page_fits: list[PageFit] = []
+    counts: list[int] = []
+    body_pages_seen = 0   # k: this many body pages processed so far
+
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for idx, page in enumerate(pdf.pages):
+            words = [to_word(d) for d in page.extract_words()]
+            counts.append(len(words))
+            markers = select_markers(words, page.width)
+            fit = fit_line_model(markers)
+            gutter = gutter_x(words, page.width)
+
+            # Provisional column numbers for THIS page if it turns out to be body.
+            left_col = 2 * body_pages_seen + 1
+            right_col = 2 * body_pages_seen + 2
+
+            page_fit = classify_page(
+                words, page.width, markers, fit, gutter,
+                page_index=idx, left_column=left_col, right_column=right_col,
+            )
+
+            if not page_fit["flagged"] and fit is not None and gutter is not None:
+                # Reuse the Phase 2 marker-selection helper — do NOT re-inline
+                # the selection rule (single source of truth for the geometry).
+                marker_xs = marker_center_xs(words, page.width)
+                pitch, intercept = fit
+                lines.extend(reconstruct_page(
+                    page, page.width, page.height, gutter, marker_xs,
+                    pitch, intercept, left_col, right_col, idx,
+                ))
+                body_pages_seen += 1
+            else:
+                # Flagged page: keep its diagnostic but zero its columns so it
+                # is clear no column numbers were consumed.
+                page_fit["left_column"] = 0
+                page_fit["right_column"] = 0
+
+            page_fits.append(page_fit)
+
+    return PatentDoc(
+        patent_id=pdf_path.stem,
+        source_path=str(pdf_path),
+        source_sha256=sha256_file(pdf_path),
+        has_text_layer=has_text_layer(counts),
+        lines=lines,
+        page_fits=page_fits,
+    )
+
+
+def write_document(doc: PatentDoc, out_path: Path) -> None:
+    """Write PatentDoc to JSON file with trailing newline (house convention)."""
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def load_document(path: Path) -> PatentDoc:
+    """Load PatentDoc from JSON, normalizing bbox lists to tuples."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    # JSON has no tuples: bbox round-trips as a list. Normalize back to tuple
+    # so the in-memory shape matches Line's contract exactly.
+    for ln in data["lines"]:
+        ln["bbox"] = tuple(ln["bbox"])
+    return data  # type: ignore[return-value]
+
+
+def build_or_load(pdf_path: Path, artifact_path: Path, *, force: bool = False) -> PatentDoc:
+    """Build or reuse cached PatentDoc based on source PDF's SHA256.
+
+    Cache hit when stored source_sha256 matches current PDF sha256.
+    force=True always triggers a rebuild.
+    """
+    if not force and artifact_path.exists():
+        cached = load_document(artifact_path)
+        if cached.get("source_sha256") == sha256_file(pdf_path):
+            return cached   # cache hit: no re-parse
+    doc = build_document(pdf_path)
+    write_document(doc, artifact_path)
+    return doc
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_probe = sub.add_parser("probe", help="Report text-layer presence and per-page word counts")
     p_probe.add_argument("--input", required=True, type=Path, help="Path to the patent PDF")
+
+    p_build = sub.add_parser("build", help="Build (or reuse) the PatentDoc JSON artifact")
+    p_build.add_argument("--input", required=True, type=Path, help="Path to the patent PDF")
+    p_build.add_argument("--out", required=True, type=Path, help="Artifact JSON path")
+    p_build.add_argument("--force", action="store_true", help="Rebuild even if a valid cache exists")
 
     args = parser.parse_args(argv)
 
@@ -527,6 +650,14 @@ def main(argv: list[str] | None = None) -> int:
         result = probe(args.input)
         json.dump(result, sys.stdout, indent=2)
         sys.stdout.write("\n")
+        return 0
+
+    if args.command == "build":
+        if not args.input.exists():
+            print(f"error: no such file: {args.input}", file=sys.stderr)
+            return 2
+        doc = build_or_load(args.input, args.out, force=args.force)
+        print(f"wrote {len(doc['lines'])} lines, {len(doc['page_fits'])} pages -> {args.out}", file=sys.stderr)
         return 0
 
     return 1
