@@ -120,6 +120,59 @@ def _marker_line(
     return v
 
 
+def _filter_markers_by_gutter_cluster(
+    xs: list[float],
+    gutter_tolerance: float = GUTTER_TOLERANCE,
+) -> set[float]:
+    """Gutter-relative refinement: filter a list of x-coordinates to the densest cluster.
+
+    Clusters xs where members are within gutter_tolerance of the cluster median.
+    Returns the set of xs belonging to the densest cluster (largest membership; ties: leftmost).
+    This is the shared refinement logic used by both select_markers and marker_center_xs.
+
+    Args:
+        xs: list of x-coordinates (center positions of marker tokens)
+        gutter_tolerance: max distance from cluster median to belong to the cluster
+
+    Returns:
+        Set of x-coordinates belonging to the densest cluster
+    """
+    if not xs:
+        return set()
+
+    xs_sorted = sorted(xs)
+
+    # Cluster xs where members are within gutter_tolerance of the cluster median
+    clusters: list[list[float]] = []
+    current_cluster: list[float] = []
+
+    for x in xs_sorted:
+        if current_cluster:
+            # Compute median of current cluster (with new x tentatively added)
+            test_cluster = current_cluster + [x]
+            test_median = statistics.median(test_cluster)
+            # Check if new x is within tolerance of cluster median
+            if abs(x - test_median) <= gutter_tolerance:
+                current_cluster.append(x)
+            else:
+                # Start a new cluster
+                clusters.append(current_cluster)
+                current_cluster = [x]
+        else:
+            # First element always starts the cluster
+            current_cluster.append(x)
+
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    # Pick the densest cluster (largest membership; ties: leftmost/lowest x)
+    if clusters:
+        densest = max(clusters, key=lambda c: (len(c), -sum(c) / len(c)))
+        return set(densest)
+
+    return set()
+
+
 def select_markers(
     words: list[Word],
     page_width: float,
@@ -142,7 +195,8 @@ def select_markers(
     """
     # Pass 1: Coarse selection via _marker_line predicate (band_frac from page center)
     candidates: dict[int, float] = {}
-    candidate_xs: dict[int, float] = {}  # Track center-x for gutter refinement
+    candidate_xs: dict[int, float] = {}  # Map line -> center_x (to track xs per line)
+    candidate_xs_list: list[float] = []  # All xs for gutter clustering
     for w in words:
         v = _marker_line(w, page_width, band_frac=band_frac, max_line=max_line)
         if v is None:
@@ -151,49 +205,19 @@ def select_markers(
         # (the band filter guarantees both echoes sit near center).
         if v not in candidates:
             candidates[v] = _y_center(w)
-            candidate_xs[v] = _center_x(w)
+            cx = _center_x(w)
+            candidate_xs[v] = cx
+            candidate_xs_list.append(cx)
 
-    # Pass 2: Gutter-relative refinement via density clustering.
-    # Instead of median-then-filter (which fails when candidates split evenly),
-    # group candidates into clusters and keep the densest cluster.
-    if candidate_xs:
-        xs_list = list(candidate_xs.values())
-        xs_sorted = sorted(xs_list)
+    # Pass 2: Gutter-relative refinement via density clustering
+    refined_xs = _filter_markers_by_gutter_cluster(candidate_xs_list, gutter_tolerance)
 
-        # Cluster candidates: group xs where members are within gutter_tolerance of the cluster median
-        clusters: list[list[float]] = []
-        current_cluster: list[float] = []
-
-        for x in xs_sorted:
-            if current_cluster:
-                # Compute median of current cluster (with new x tentatively added)
-                test_cluster = current_cluster + [x]
-                test_median = statistics.median(test_cluster)
-                # Check if new x is within tolerance of cluster median
-                if abs(x - test_median) <= gutter_tolerance:
-                    current_cluster.append(x)
-                else:
-                    # Start a new cluster
-                    clusters.append(current_cluster)
-                    current_cluster = [x]
-            else:
-                # First element always starts the cluster
-                current_cluster.append(x)
-
-        if current_cluster:
-            clusters.append(current_cluster)
-
-        # Pick the densest cluster (largest membership; ties: leftmost/lowest x)
-        if clusters:
-            densest = max(clusters, key=lambda c: (len(c), -sum(c) / len(c)))
-            densest_median = statistics.median(densest)
-
-            # Retain only markers whose center-x is in the densest cluster
-            candidates = {
-                line: y
-                for line, y in candidates.items()
-                if abs(candidate_xs[line] - densest_median) <= gutter_tolerance
-            }
+    # Retain only markers whose center-x is in the refined cluster
+    candidates = {
+        line: y
+        for line, y in candidates.items()
+        if candidate_xs[line] in refined_xs
+    }
 
     return sorted(candidates.items())
 
@@ -204,15 +228,34 @@ def marker_center_xs(
     *,
     band_frac: float = CENTER_BAND_FRAC,
     max_line: int = MAX_PLAUSIBLE_LINE,
+    gutter_tolerance: float = GUTTER_TOLERANCE,
 ) -> list[float]:
-    """Center-x of every retained gutter-marker token (same _marker_line rule as
-    select_markers). Feeds the gutter median and the Phase 3 dead-zone.
+    """Center-x of every retained gutter-marker token, post-gutter-clustering.
+
+    Uses the same two-pass selection as select_markers:
+    1. Coarse _marker_line filter (band_frac from page center)
+    2. Gutter-relative refinement to exclude outliers
+
+    Feeds gutter_x (median) and dead_zone_halfwidth (the spread).
+    Critical: must return the SAME set of xs that select_markers uses, so that
+    marker_center_xs' spread matches the gutter-clustered markers select_markers keeps.
     """
-    return [
-        _center_x(w)
-        for w in words
-        if _marker_line(w, page_width, band_frac=band_frac, max_line=max_line) is not None
-    ]
+    # Collect all coarse-selected xs AND their originating words/lines
+    coarse_xs = []
+    coarse_lines = []
+    for w in words:
+        v = _marker_line(w, page_width, band_frac=band_frac, max_line=max_line)
+        if v is not None:
+            coarse_xs.append(_center_x(w))
+            coarse_lines.append(v)
+
+    # Apply gutter-clustering refinement (same as select_markers)
+    # But preserve the per-token xs, only excluding xs from lines that are outliers
+    refined_xs_set = _filter_markers_by_gutter_cluster(coarse_xs, gutter_tolerance)
+
+    # Return all xs whose values are in the refined set
+    # This preserves duplicates (multiple tokens with same marker value at same x)
+    return [cx for cx in coarse_xs if cx in refined_xs_set]
 
 
 def gutter_x(words: list[Word], page_width: float, *, band_frac: float = CENTER_BAND_FRAC) -> float | None:
@@ -272,10 +315,39 @@ def dead_zone_halfwidth(marker_xs: list[float]) -> float:
     On scans the gutter skews top-to-bottom (~4 pt observed); the marker tokens
     reveal that drift directly via their center-x spread. We buffer the full
     spread plus a margin, floored at BASE_DEAD_ZONE.
+
+    Defense in depth: robust to outliers by excluding extreme values and computing
+    the spread from the central cluster. This protects against a single stray marker
+    that might escape the gutter-clustering refinement (though such escapes should be
+    rare after the shared _filter_markers_by_gutter_cluster call).
     """
     if not marker_xs:
         return BASE_DEAD_ZONE
-    drift = max(marker_xs) - min(marker_xs)
+
+    if len(marker_xs) == 1:
+        return BASE_DEAD_ZONE
+
+    if len(marker_xs) == 2:
+        drift = max(marker_xs) - min(marker_xs)
+        return max(BASE_DEAD_ZONE, drift + DEAD_ZONE_MARGIN)
+
+    # For 3+ points: use a robust approach: exclude the min and max,
+    # then compute drift from the remaining central points.
+    # This handles the case of one outlier while preserving the true drift.
+    sorted_xs = sorted(marker_xs)
+    central = sorted_xs[1:-1]  # Exclude min and max
+
+    if central:
+        drift = max(central) - min(central)
+    else:
+        # Should not happen, but fallback to full range
+        drift = max(marker_xs) - min(marker_xs)
+
+    # Cap drift at 50pt (reasonable maximum for real gutter drift)
+    # to handle pathological cases. On born-digital and OCR scans,
+    # real drift is <= 5pt.
+    drift = min(drift, 50.0)
+
     return max(BASE_DEAD_ZONE, drift + DEAD_ZONE_MARGIN)
 
 
@@ -294,13 +366,26 @@ def reconstruct_page(
     """Crop LEFT and RIGHT columns around the dead-zoned gutter, line-extract
     each in isolation, drop the header band (predicted line < 1), and tag every
     surviving line with its column and printed line number.
+
+    IMPORTANT #3 guard: Clamp crop bounds to [0, page_width] to prevent inverted/empty
+    crops if the dead-zone is miscalibrated or the gutter is at a page edge.
     """
     dz = dead_zone_halfwidth(marker_xs)
     out: list[Line] = []
-    crops = (
-        (left_column, page.crop((0, 0, gutter - dz, page_height))),
-        (right_column, page.crop((gutter + dz, 0, page_width, page_height))),
-    )
+
+    # Clamp crop bounds to valid page coordinates
+    left_x0 = 0
+    left_x1 = max(0, min(gutter - dz, page_width))
+    right_x0 = max(0, min(gutter + dz, page_width))
+    right_x1 = page_width
+
+    # Skip columns with non-positive width (degenerate crop)
+    crops = []
+    if left_x1 > left_x0:
+        crops.append((left_column, page.crop((left_x0, 0, left_x1, page_height))))
+    if right_x1 > right_x0:
+        crops.append((right_column, page.crop((right_x0, 0, right_x1, page_height))))
+
     for column, crop in crops:
         for ln in crop.extract_text_lines():
             yc = (ln["top"] + ln["bottom"]) / 2.0
