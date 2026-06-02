@@ -358,9 +358,23 @@ class TestColumnSignalIsCleanIntegration:
     def test_column_signal_is_clean_integration_us4731298_all_clean(self, ocr_pdf):
         """US4731298 (OCR-scanned) pages 2–5 (0-indexed 1–4) all measure as CLEAN.
 
-        Hardcoded ground truth (measured 2026-06-02): all columns on pages 1–4 are CLEAN.
-        This fixture shows high-quality OCR; the memory's reference to mixed CLEAN/NOISY
-        on US4731298 may reflect a different extraction approach or different pages.
+        Hardcoded ground truth (measured 2026-06-02): every column on pages 1–4 is
+        CLEAN (frac_clean 0.92–1.00, frac_tiny 0.00) when y-centers come from
+        ``crop.extract_text_lines()`` — the SAME line-collection path that
+        ``reconstruct_page`` uses in production (verified: it iterates
+        ``crop.extract_text_lines()`` and takes ``(top+bottom)/2`` per line).
+
+        The phase plan / ``project_patent_line_numbering_truth`` memory predicted
+        idx1R/2L/3R/4L would measure NOISY (frac_tiny 0.29–0.36). That prediction
+        does NOT reproduce on this extraction path: pdfplumber's
+        ``extract_text_lines()`` clusters word fragments back into one line per
+        printed row, healing the intra-line gaps before the gate sees them. The
+        high-frac_tiny signal only appears if EVERY word is treated as its own
+        y-center (no row clustering, n≈500/col → frac_tiny≈0.88) — which is not how
+        production collects lines. So on the real production path this fixture is
+        uniformly CLEAN, and AC3.2 (NOISY classification) is exercised by the
+        synthetic unit test ``test_column_signal_is_clean_fragmented_ocr_noisy``,
+        not by a real fixture column. See the corrected memory note.
         """
         import pdfplumber
         from patent_extract import (
