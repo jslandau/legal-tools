@@ -140,6 +140,13 @@ BLANK_GAP_LO = 0.7          # a gap below this (down to TINY) is still "one line
 BLANK_GAP_HI = 1.4          # a gap up to this is "one line"; above 1.5 it implies a blank slot
 TINY_GAP_FRAC_CUTOFF = 0.6  # a gap below this * pitch is implausible -> OCR fragmentation
 
+# Column quality gate (OCR robustness). A column's text-line signal is trustworthy for
+# blank classification iff most consecutive gaps sit near one pitch and few are implausibly
+# tiny. Measured: born-digital columns frac_clean >= 0.90, frac_tiny ~0; fragmented-OCR
+# columns frac_clean 0.52..0.60, frac_tiny 0.29..0.36. Thresholds chosen in the gap.
+CLEAN_GAP_FRAC = 0.75   # >= this fraction of gaps within [BLANK_GAP_LO, BLANK_GAP_HI] -> clean
+TINY_GAP_FRAC = 0.05    # <= this fraction of gaps below TINY_GAP_FRAC_CUTOFF -> clean
+
 _DIGITS = re.compile(r"\d{1,3}")
 
 
@@ -498,6 +505,33 @@ def slots_spanned(gap_ratio: float) -> int:
         Integer number of slots (always >= 1).
     """
     return max(1, round(gap_ratio))
+
+
+def column_signal_is_clean(gap_ratios: list[float]) -> bool:
+    """Decide whether a column's text-line signal is clean enough to classify blanks.
+
+    A column's text-line signal is trustworthy for blank classification (born-digital
+    with stable line spacing) iff most consecutive gaps sit near one pitch (clean)
+    and few are implausibly tiny (OCR fragmentation). Columns with < 3 gaps are too
+    small to judge reliably, so we don't penalize legitimate short columns like claims
+    tails; Phase 2's classifier will still only emit blanks it can justify geometrically.
+
+    Args:
+        gap_ratios: list of gap/pitch ratios for a single column's consecutive text lines.
+
+    Returns:
+        True if the column's signal is clean (classifiable); False if noisy (fragmented OCR).
+    """
+    # Short columns (< 3 gaps): too few to judge — return True (do not penalize)
+    if len(gap_ratios) < 3:
+        return True
+
+    # Compute fractions
+    frac_clean = sum(1 for g in gap_ratios if BLANK_GAP_LO <= g <= BLANK_GAP_HI) / len(gap_ratios)
+    frac_tiny = sum(1 for g in gap_ratios if g < TINY_GAP_FRAC_CUTOFF) / len(gap_ratios)
+
+    # Clean iff frac_clean >= threshold AND frac_tiny <= threshold
+    return frac_clean >= CLEAN_GAP_FRAC and frac_tiny <= TINY_GAP_FRAC
 
 
 def dead_zone_halfwidth(marker_xs: list[float]) -> float:
