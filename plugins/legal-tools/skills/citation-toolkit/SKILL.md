@@ -585,7 +585,7 @@ python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact u
 python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 3:12-14
 ```
 
-Output: the joined printed text for the requested span on stdout, with lines separated by newline. Cross-column citations read in document order: start column from start_line to its max_line, each intermediate column 1 to its max_line, then end column from 1 to end_line. 
+Output: the joined printed text for the requested span on stdout, with lines separated by newline. Cross-column citations read in document order: start column from start_line to its max_line, each intermediate column 1 to its max_line, then end column from 1 to end_line.
 
 **Blank line handling:** US patents number every physical line slot, including blank spacing around centered headings. Interior line numbers that are absent from the extraction (no text-bearing line at that slot) are rendered as empty strings in the output, preserving the isomorphic structure to the printed page. Example: if column 3 line 13 is blank, `--cite 3:12-14` returns three lines joined by newlines with the middle one empty: `"line12\n\nline14"` (note the blank middle segment yields a blank line in the output).
 
