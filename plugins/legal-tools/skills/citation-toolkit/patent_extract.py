@@ -132,6 +132,14 @@ HEADER_MAX_VALUE = 999      # printed column numbers are small ints (reject body
 HEADER_MIN_OFFSET = 60.0    # pt; a header digit must sit at least this far from the gutter (column-center region)
 GUTTER_CROSSCHECK_TOL = 5.0 # pt; line-marker gutter vs header-midpoint must agree within this (OCR scans ~2pt)
 
+# Line-numbering gap classification (dimensionless — multiples of the column's OWN gutter pitch).
+# Derived empirically (2026-06-01) across US9154231 / US8131198 / US4731298 body columns:
+# consecutive (no-blank) text-line gaps cluster at 0.76..1.40 pitch; one real blank line
+# shows 1.68..2.16 pitch. The valley is at 1.5, so round(gap/pitch) cleanly separates them.
+BLANK_GAP_LO = 0.7          # a gap below this (down to TINY) is still "one line" (tight leading)
+BLANK_GAP_HI = 1.4          # a gap up to this is "one line"; above 1.5 it implies a blank slot
+TINY_GAP_FRAC_CUTOFF = 0.6  # a gap below this * pitch is implausible -> OCR fragmentation
+
 _DIGITS = re.compile(r"\d{1,3}")
 
 
@@ -449,6 +457,47 @@ def max_marker_residual(markers: list[tuple[int, float]], pitch: float, intercep
     once produced spurious nonzero values while extraction was correct.
     """
     return max(abs(line - line_at(y, pitch, intercept)) for line, y in markers)
+
+
+def line_gaps_in_pitch(y_centers: list[float], pitch: float) -> list[float]:
+    """Consecutive gaps between text-line y-centers, expressed as multiples of the gutter pitch.
+
+    Requires y_centers to be sorted in ascending order. Returns the list of gaps
+    [(y_centers[i+1] - y_centers[i]) / pitch for i in range(len-1)]. Empty list
+    if fewer than 2 y-centers.
+
+    Args:
+        y_centers: sorted list of text-line vertical centers (points, in ascending order)
+        pitch: gutter pitch (distance per line, in same units as y_centers). Must be > 0.
+
+    Returns:
+        List of gap ratios (dimensionless).
+
+    Raises:
+        ValueError: if pitch <= 0.
+    """
+    if pitch <= 0:
+        raise ValueError("pitch must be positive (a caller bug to pass pitch <= 0)")
+    if len(y_centers) < 2:
+        return []
+    return [(y_centers[i + 1] - y_centers[i]) / pitch for i in range(len(y_centers) - 1)]
+
+
+def slots_spanned(gap_ratio: float) -> int:
+    """Number of line slots a single inter-line gap spans.
+
+    Given a gap expressed as a multiple of the column's gutter pitch, returns the
+    count of printed-line slots it spans: 1 = consecutive (normal leading), 2 = one
+    blank line between, etc. Computed as max(1, round(gap_ratio)), so a tight gap
+    or any sub-1 OCR artifact cannot collapse two lines onto one slot.
+
+    Args:
+        gap_ratio: inter-line gap as multiple of gutter pitch (dimensionless).
+
+    Returns:
+        Integer number of slots (always >= 1).
+    """
+    return max(1, round(gap_ratio))
 
 
 def dead_zone_halfwidth(marker_xs: list[float]) -> float:
