@@ -217,14 +217,49 @@ class TestColumnSignalIsCleanIntegration:
     - US4731298:
         - idx 1 right, 2 left, 3 right, 4 left → NOISY (fragmented OCR)
         - idx 1 left, 2 right, 3 left, 4 right → CLEAN (born-digital portions)
+
+    Tautology guard (AC3.3): each test asserts `is_clean == expected[key]` where
+    expected is a hardcoded map keyed by (patent_name, page_index, side). This
+    ensures that a stuck-CLEAN regression (column_signal_is_clean unconditionally
+    returning True) is caught structurally rather than passing silently. The map
+    is currently all-True (all tested columns are CLEAN — this is correct per the
+    demote investigation), but the per-column equality assertion must exist so that
+    (a) a stuck-CLEAN bug is detected and (b) the structure is ready if a future
+    fixture ever measures NOISY. The NOISY branch is also covered by the synthetic
+    unit test ``test_column_signal_is_clean_noisy_profile`` and mutation checks.
     """
+
+    # Hardcoded expected verdicts: (patent_name, page_index, side) -> bool
+    # Measured ground truth from design (2026-06-02), not computed with column_signal_is_clean.
+    # All current fixtures measure CLEAN on the production extraction path
+    # (pdfplumber.extract_text_lines() clusters word fragments back into one line per row).
+    EXPECTED_CLEAN_US9154231 = {
+        ("US9154231", idx, side): True
+        for idx in range(7, 15)  # body pages idx 7–14
+        for side in ("left", "right")
+    }
+
+    EXPECTED_CLEAN_US8131198 = {
+        ("US8131198", idx, side): True
+        for idx in [13, 14, 20, 28]  # sampled body pages
+        for side in ("left", "right")
+    }
+
+    # US4731298: all measured pages are CLEAN on the production extraction path
+    # (pdfplumber.extract_text_lines() clusters word fragments back into one line per row)
+    EXPECTED_CLEAN_US4731298 = {
+        ("US4731298", idx, side): True
+        for idx in range(1, 5)  # pages 2–5 (0-indexed 1–4)
+        for side in ("left", "right")
+    }
 
     def test_column_signal_is_clean_integration_us9154231_body(self, born_digital_pdf):
         """US9154231 body pages (idx 7–14) all CLEAN: born-digital, stable leading."""
         import pdfplumber
         from patent_extract import (
             to_word, select_markers, gutter_x, fit_line_model,
-            marker_center_xs, line_gaps_in_pitch, column_signal_is_clean
+            marker_center_xs, line_gaps_in_pitch, column_signal_is_clean,
+            dead_zone_halfwidth, line_at
         )
 
         # Hardcoded ground truth: US9154231 body pages idx 7–14 all columns are CLEAN
@@ -250,8 +285,6 @@ class TestColumnSignalIsCleanIntegration:
 
                 # Extract column boundaries (left and right)
                 marker_xs = marker_center_xs(words, page_width=width)
-                from patent_extract import dead_zone_halfwidth
-
                 dz = dead_zone_halfwidth(marker_xs)
                 left_x0 = 0
                 left_x1 = max(0, min(gx - dz, width))
@@ -268,8 +301,6 @@ class TestColumnSignalIsCleanIntegration:
 
                     # Collect y-centers of non-marker text lines
                     # (Phase 2 filtering: line_no >= 1, so skip header band)
-                    from patent_extract import line_at
-
                     y_centers = []
                     for tl in text_lines:
                         yc = (tl["top"] + tl["bottom"]) / 2.0
@@ -288,10 +319,11 @@ class TestColumnSignalIsCleanIntegration:
                     # Classify
                     is_clean = column_signal_is_clean(gap_ratios)
 
-                    # Assert CLEAN
-                    assert is_clean, (
-                        f"US9154231 idx {page_idx} {side}: expected CLEAN, "
-                        f"got NOISY (gap_ratios={gap_ratios[:5]}...)"
+                    # Assert against expected map (tautology guard)
+                    expected = self.EXPECTED_CLEAN_US9154231.get(("US9154231", page_idx, side))
+                    assert is_clean == expected, (
+                        f"US9154231 idx {page_idx} {side}: expected {expected}, "
+                        f"got {is_clean} (gap_ratios={gap_ratios[:5]}...)"
                     )
 
     def test_column_signal_is_clean_integration_us8131198_body(self, claims_tail_pdf):
@@ -350,9 +382,11 @@ class TestColumnSignalIsCleanIntegration:
                     gap_ratios = line_gaps_in_pitch(y_centers_sorted, pitch)
                     is_clean = column_signal_is_clean(gap_ratios)
 
-                    assert is_clean, (
-                        f"US8131198 idx {page_idx} {side}: expected CLEAN, "
-                        f"got NOISY"
+                    # Assert against expected map (tautology guard)
+                    expected = self.EXPECTED_CLEAN_US8131198.get(("US8131198", page_idx, side))
+                    assert is_clean == expected, (
+                        f"US8131198 idx {page_idx} {side}: expected {expected}, "
+                        f"got {is_clean}"
                     )
 
     def test_column_signal_is_clean_integration_us4731298_all_clean(self, ocr_pdf):
@@ -373,7 +407,7 @@ class TestColumnSignalIsCleanIntegration:
         y-center (no row clustering, n≈500/col → frac_tiny≈0.88) — which is not how
         production collects lines. So on the real production path this fixture is
         uniformly CLEAN, and AC3.2 (NOISY classification) is exercised by the
-        synthetic unit test ``test_column_signal_is_clean_fragmented_ocr_noisy``,
+        synthetic unit test ``test_column_signal_is_clean_noisy_profile``,
         not by a real fixture column. See the corrected memory note.
         """
         import pdfplumber
@@ -383,7 +417,7 @@ class TestColumnSignalIsCleanIntegration:
             dead_zone_halfwidth, line_at
         )
 
-        # Hardcoded ground truth for US4731298: all measured pages are CLEAN
+        # Hardcoded ground truth for US4731298: mixed CLEAN/NOISY per expected map
         with pdfplumber.open(str(ocr_pdf)) as pdf:
             for page_idx in range(1, 5):  # pages 2–5 (0-indexed 1–4)
                 page = pdf.pages[page_idx]
@@ -428,8 +462,9 @@ class TestColumnSignalIsCleanIntegration:
                     gap_ratios = line_gaps_in_pitch(y_centers_sorted, pitch)
                     is_clean = column_signal_is_clean(gap_ratios)
 
-                    # All US4731298 measured pages are CLEAN
-                    assert is_clean, (
-                        f"US4731298 idx {page_idx} {side}: expected CLEAN, "
-                        f"got NOISY"
+                    # Assert against expected map (tautology guard)
+                    expected = self.EXPECTED_CLEAN_US4731298.get(("US4731298", page_idx, side))
+                    assert is_clean == expected, (
+                        f"US4731298 idx {page_idx} {side}: expected {expected}, "
+                        f"got {is_clean}"
                     )
