@@ -580,9 +580,16 @@ python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact u
 
 # Cross-column span (column 4 line 65 through column 5 line 3)
 python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 4:65-5:3
+
+# Span with interior blank line (rendered as blank in output)
+python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 3:12-14
 ```
 
-Output: the joined printed text for the requested span on stdout, with lines separated by newline. Cross-column citations read in document order: start column from start_line to its max_line, each intermediate column 1 to its max_line, then end column from 1 to end_line. Errors (malformed citations, out-of-range column/line) go to stderr and produce exit code 1.
+Output: the joined printed text for the requested span on stdout, with lines separated by newline. Cross-column citations read in document order: start column from start_line to its max_line, each intermediate column 1 to its max_line, then end column from 1 to end_line. 
+
+**Blank line handling:** US patents number every physical line slot, including blank spacing around centered headings. Interior line numbers that are absent from the extraction (no text-bearing line at that slot) are rendered as empty strings in the output, preserving the isomorphic structure to the printed page. Example: if column 3 line 13 is blank, `--cite 3:12-14` returns three lines joined by newlines with the middle one empty: `"line12\n\nline14"` (note the blank middle segment yields a blank line in the output).
+
+**Errors:** Out-of-range citations (start_line > max_line of start_col, end_line > max_line of end_col, or referenced column absent) raise CiteError to stderr with exit code 1. Malformed citations also error.
 
 The query script is stdlib-only — no dependencies beyond Python 3.
 

@@ -10,6 +10,14 @@ or "col:start-col2:end" (cross-column). Examples:
   - "5:1-3" → column 5, lines 1-3
   - "4:65-5:3" → column 4 line 65 through column 5 line 3 (cross-column)
 
+Blank line handling:
+  US patents number EVERY physical line slot, including blank spacing lines around
+  centered headings. Some interior line numbers are therefore absent from the artifact
+  (no text-bearing line at that slot). These blank interior lines are rendered as
+  empty strings in the output, so the result is isomorphic to the printed page.
+  Example: if column 3 line 13 is blank, looking up "3:12-14" returns three lines
+  joined by newlines, with the middle one empty: "line12\n\nline14".
+
 Local only: reads a local artifact, makes no network calls.
 
 Usage:
@@ -22,6 +30,9 @@ Usage:
 
     # Cross-column span:
     python3 patent_query.py --artifact us9154231.json --cite 4:65-5:3
+
+    # Span with interior blank line (rendered as blank):
+    python3 patent_query.py --artifact us9154231.json --cite 3:12-14
 
 Output: the resolved text on stdout. Errors go to stderr (exit non-zero).
 """
@@ -100,18 +111,25 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
 
     If start_col == end_col, just lines start_line..end_line of that column.
 
-    Raises CiteError if any referenced column is absent or any required line is missing.
+    Blank interior lines (within the column's max range but absent from the artifact)
+    are rendered as empty strings, so output is isomorphic to the printed page.
+
+    Raises CiteError if:
+    - Any referenced column is absent from the artifact
+    - start_line > max_line(start_col) or end_line > max_line(end_col) (out of range)
     """
-    # Build a per-column {line: text} index for this lookup.
+    # Build per-column {line: text} index and compute max_line for each column.
     # Per-call rebuild is intentional for current build-once/query-occasionally usage;
     # if cite-check batches many lookups, memoizing this index is the optimization.
     by_column = {}
+    max_line_by_column = {}
     for ln in doc["lines"]:
         col = ln["column"]
         line_num = ln["line"]
         if col not in by_column:
             by_column[col] = {}
         by_column[col][line_num] = ln["text"]
+        max_line_by_column[col] = max(max_line_by_column.get(col, 0), line_num)
 
     lines_to_join = []
 
@@ -120,42 +138,68 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
         if start_col not in by_column:
             raise CiteError(f"column {start_col} not present in artifact")
         col_lines = by_column[start_col]
-        missing = [n for n in range(start_line, end_line + 1) if n not in col_lines]
-        if missing:
-            raise CiteError(f"column {start_col}: line(s) {missing} not present")
+        max_col = max_line_by_column[start_col]
+
+        # Check bounds: start_line and end_line must not exceed max_line
+        if start_line > max_col:
+            raise CiteError(f"column {start_col}: line {start_line} out of range (max {max_col})")
+        if end_line > max_col:
+            raise CiteError(f"column {start_col}: line {end_line} out of range (max {max_col})")
+
+        # Collect lines, rendering blanks as empty strings
         for ln in range(start_line, end_line + 1):
-            lines_to_join.append(col_lines[ln])
+            if ln in col_lines:
+                lines_to_join.append(col_lines[ln])
+            else:
+                # Blank interior line: render as empty string
+                lines_to_join.append("")
     else:
         # Cross-column: start_col -> max, intermediates -> all, end_col -> 1..end_line
         # Start column: start_line to max_line
         if start_col not in by_column:
             raise CiteError(f"column {start_col} not present in artifact")
         col_lines = by_column[start_col]
-        max_start_line = max(col_lines.keys())
-        for ln in range(start_line, max_start_line + 1):
-            if ln not in col_lines:
-                raise CiteError(f"column {start_col}: line {ln} not present")
-            lines_to_join.append(col_lines[ln])
+        max_start_col = max_line_by_column[start_col]
+
+        # Check bounds: start_line must not exceed max_line of start_col
+        if start_line > max_start_col:
+            raise CiteError(f"column {start_col}: line {start_line} out of range (max {max_start_col})")
+
+        # Collect from start_line to max of start_col, rendering blanks as ""
+        for ln in range(start_line, max_start_col + 1):
+            if ln in col_lines:
+                lines_to_join.append(col_lines[ln])
+            else:
+                lines_to_join.append("")
 
         # Intermediate columns: 1 to max_line
         for col in range(start_col + 1, end_col):
             if col not in by_column:
                 raise CiteError(f"column {col} not present in artifact")
             col_lines = by_column[col]
-            max_col_line = max(col_lines.keys())
+            max_col_line = max_line_by_column[col]
             for ln in range(1, max_col_line + 1):
-                if ln not in col_lines:
-                    raise CiteError(f"column {col}: line {ln} not present")
-                lines_to_join.append(col_lines[ln])
+                if ln in col_lines:
+                    lines_to_join.append(col_lines[ln])
+                else:
+                    lines_to_join.append("")
 
         # End column: 1 to end_line
         if end_col not in by_column:
             raise CiteError(f"column {end_col} not present in artifact")
         col_lines = by_column[end_col]
+        max_end_col = max_line_by_column[end_col]
+
+        # Check bounds: end_line must not exceed max_line of end_col
+        if end_line > max_end_col:
+            raise CiteError(f"column {end_col}: line {end_line} out of range (max {max_end_col})")
+
+        # Collect from 1 to end_line of end_col, rendering blanks as ""
         for ln in range(1, end_line + 1):
-            if ln not in col_lines:
-                raise CiteError(f"column {end_col}: line {ln} not present")
-            lines_to_join.append(col_lines[ln])
+            if ln in col_lines:
+                lines_to_join.append(col_lines[ln])
+            else:
+                lines_to_join.append("")
 
     return "\n".join(lines_to_join)
 

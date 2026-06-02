@@ -212,46 +212,93 @@ class TestLookup:
             f"got {text!r}"
         )
 
-    def test_ac6_2_intermediate_column_gap_raises_cite_error(self, us9_artifact: dict):
-        """NEW TEST: Cross-column span with gappy intermediate column raises CiteError naming the missing line.
+    def test_ac6_2_cross_column_span_renders_blank_lines(self, us9_artifact: dict):
+        """NEW BEHAVIOR: Cross-column span with gappy intermediate column renders blank lines as "".
 
-        For US9154231, column 3 has gaps at lines [13, 33, 50, 52]. This test spans from
-        column 2 (gap-free) through column 3 (gappy) to column 5 (gap-free), ensuring
-        the intermediate-column reading order detects the gap and raises CiteError.
+        For US9154231, column 3 has gaps at lines [13, 33, 50, 52]. A cross-column span
+        through column 3 should render blank interior lines as empty strings, making the
+        output isomorphic to the printed page (blank lines appear as blank in the output).
 
-        The test computes the first missing line in column 3 programmatically and
-        asserts it appears in the error message.
+        This test derives the first blank line programmatically to stay robust.
         """
-        from patent_query import lookup_cite, CiteError
+        from patent_query import lookup_cite
 
-        # Span: 2:67-5:1 (start col 2, end col 5, intermediates 3,4)
-        # Column 3 is gappy; find its first missing line
+        # Find the first missing line in column 3 (the first blank interior line)
         lines_in_col3 = sorted([
             line["line"] for line in us9_artifact["lines"] if line["column"] == 3
         ])
         max_col3 = max(lines_in_col3)
 
-        # Compute first missing line in range 1..max_col3
-        first_missing = None
+        first_blank = None
         for n in range(1, max_col3 + 1):
             if n not in lines_in_col3:
-                first_missing = n
+                first_blank = n
                 break
 
-        assert first_missing is not None, "Column 3 should have at least one gap"
+        assert first_blank is not None, "Column 3 should have at least one gap for this test"
+        assert first_blank <= max_col3, "Blank line should be interior (not beyond max)"
 
-        # Attempt the cross-column cite
-        cite = "2:67-5:1"
+        # Create a single-column span that crosses the blank line
+        # Use start_line just before the blank, end_line just after
+        start_line = first_blank - 1
+        end_line = first_blank + 1
 
-        with pytest.raises(CiteError) as exc_info:
-            lookup_cite(us9_artifact, cite)
+        # Verify the bookend lines exist in column 3
+        assert start_line in lines_in_col3, f"Line {start_line} should exist in column 3"
+        assert end_line in lines_in_col3, f"Line {end_line} should exist in column 3"
 
-        error_message = str(exc_info.value)
-        # Error message should name column 3 and the missing line
-        assert "3" in error_message, f"Error should mention column 3: {error_message}"
-        assert str(first_missing) in error_message, (
-            f"Error should name the missing line {first_missing} in column 3: {error_message}"
+        # Query the span
+        cite = f"3:{start_line}-{end_line}"
+        text = lookup_cite(us9_artifact, cite)
+
+        # Split and validate structure
+        parts = text.split("\n")
+        assert len(parts) == 3, f"Span should have 3 parts (line, blank, line), got {len(parts)}: {parts!r}"
+
+        # Middle part should be empty (blank line)
+        assert parts[1] == "", f"Middle part should be empty string (blank line), got {parts[1]!r}"
+
+        # Bookend parts should match the artifact lines
+        expected_start = next(
+            line["text"] for line in us9_artifact["lines"]
+            if line["column"] == 3 and line["line"] == start_line
         )
+        expected_end = next(
+            line["text"] for line in us9_artifact["lines"]
+            if line["column"] == 3 and line["line"] == end_line
+        )
+
+        assert parts[0] == expected_start, f"Start line mismatch: {parts[0]!r} vs {expected_start!r}"
+        assert parts[2] == expected_end, f"End line mismatch: {parts[2]!r} vs {expected_end!r}"
+
+    def test_ac6_2_same_column_span_with_blank_line(self, us9_artifact: dict):
+        """Same-column span with interior blank line renders the blank as "".
+
+        Directly test the '3:12-14' case (line 13 is blank in column 3).
+        """
+        from patent_query import lookup_cite
+
+        # Column 3 line 13 is blank (interior missing line)
+        cite = "3:12-14"
+        text = lookup_cite(us9_artifact, cite)
+
+        # Split and check structure
+        parts = text.split("\n")
+        assert len(parts) == 3, f"Span 3:12-14 should have 3 parts, got {len(parts)}: {parts!r}"
+        assert parts[1] == "", f"Line 13 should render as empty string, got {parts[1]!r}"
+
+        # Verify lines 12 and 14 match the artifact
+        expected_12 = next(
+            line["text"] for line in us9_artifact["lines"]
+            if line["column"] == 3 and line["line"] == 12
+        )
+        expected_14 = next(
+            line["text"] for line in us9_artifact["lines"]
+            if line["column"] == 3 and line["line"] == 14
+        )
+
+        assert parts[0] == expected_12, f"Line 12 mismatch"
+        assert parts[2] == expected_14, f"Line 14 mismatch"
 
     def test_ac6_3_column_absent(self, us9_artifact: dict):
         """AC6.3: lookup_cite(doc, '999:1') raises CiteError (column absent)."""
