@@ -589,12 +589,183 @@ def dead_zone_halfwidth(marker_xs: list[float]) -> float:
     return max(BASE_DEAD_ZONE, drift + DEAD_ZONE_MARGIN)
 
 
+def number_column_slots(
+    text_lines: list[tuple[float, str]],
+    markers: list[tuple[int, float]],
+    pitch: float,
+    intercept: float,
+) -> list[tuple[int, str, str]]:
+    """Pure marker-anchored slot-filling function.
+
+    Returns a list of (line_number, text, kind) tuples for every slot 1..max_line
+    in a single column, where kind is one of "text", "blank", "spurious", "unknown".
+
+    Args:
+        text_lines: ascending list of (y_center, text) for the column's extracted text lines
+                    (header band already dropped).
+        markers: (line, y_center) printed marker checkpoints for this column (may be empty
+                 for marker-less pages).
+        pitch: column's gutter pitch (distance per line).
+        intercept: y-intercept of the line model (y = intercept + pitch * line_number).
+
+    Returns:
+        List of (line_number, text, kind) tuples for every slot 1..max_line.
+        Invariant: text != "" iff kind == "text".
+        kind is one of: "text" (rendered line), "blank" (real printed empty line),
+        "spurious" (grid slot skipped by text), "unknown" (unable to classify, marker-less).
+    """
+    if not text_lines:
+        return []
+
+    # Step 1: Assign each text line a gutter number (marker-anchored or borrowed).
+    assigned_lines: list[tuple[int, str]] = []  # (line_number, text)
+
+    if markers:
+        # Marker-bearing: anchor on nearest marker
+        for yc, text in text_lines:
+            nearest = min(markers, key=lambda m: abs(yc - m[1]))
+            n = nearest[0] + round((yc - nearest[1]) / pitch)
+            assigned_lines.append((n, text))
+    else:
+        # Marker-less: use borrowed pitch, then shift so first text line is line 1
+        for yc, text in text_lines:
+            n = round((yc - intercept) / pitch)
+            assigned_lines.append((n, text))
+
+        # Shift so the first assigned line becomes line 1
+        if assigned_lines:
+            min_line = assigned_lines[0][0]
+            assigned_lines = [(n - min_line + 1, text) for n, text in assigned_lines]
+
+    # Step 2: Enforce strict monotonicity (guard against collisions).
+    monotonic_lines: list[tuple[int, str]] = []
+    for n, text in assigned_lines:
+        # If this line number <= last, bump it to last + 1
+        if monotonic_lines and n <= monotonic_lines[-1][0]:
+            n = monotonic_lines[-1][0] + 1
+        monotonic_lines.append((n, text))
+
+    if not monotonic_lines:
+        return []
+
+    # Step 3: Slot filling + kind classification.
+    max_line = monotonic_lines[-1][0]
+    result: list[tuple[int, str, str]] = []
+
+    # Emit a row for each slot 1..max_line
+    i = 0  # index into monotonic_lines
+    for slot in range(1, max_line + 1):
+        if i < len(monotonic_lines) and monotonic_lines[i][0] == slot:
+            # This slot has a text line
+            _, text = monotonic_lines[i]
+            result.append((slot, text, "text"))
+            i += 1
+        else:
+            # This slot is a gap (no text line at this number)
+            # Classify by marker presence and physical gap
+            if not markers:
+                # Marker-less: unknown
+                result.append((slot, "", "unknown"))
+            else:
+                # Marker-bearing: classify by gap (look back to previous text, forward to next)
+                prev_slot = slot - 1
+                next_slot = slot + 1
+
+                # Find the y-centers of the text lines bounding this gap
+                prev_line_idx = i - 1  # Last emitted text line
+                next_line_idx = i      # Next text line to emit
+
+                if prev_line_idx >= 0 and next_line_idx < len(monotonic_lines):
+                    # Both sides: use the gap between them
+                    prev_n, prev_text = monotonic_lines[prev_line_idx]
+                    next_n, next_text = monotonic_lines[next_line_idx]
+
+                    # Recover y-centers from original text_lines (keep parallel to monotonic_lines)
+                    # Actually, we lost the y-centers. Let me reconsider...
+                    # We have monotonic_lines which is (line_number, text).
+                    # We need the y-centers to compute gap ratios.
+                    # Let me refactor: I'll keep a parallel list of y_centers.
+                    pass
+
+    # Actually, I need to refactor to keep y-centers. Let me rewrite.
+
+    # Step 1 (revised): Assign each text line a gutter number AND keep y-centers
+    assigned_lines_with_y: list[tuple[int, str, float]] = []  # (line_number, text, y)
+
+    if markers:
+        # Marker-bearing: anchor on nearest marker
+        for yc, text in text_lines:
+            nearest = min(markers, key=lambda m: abs(yc - m[1]))
+            n = nearest[0] + round((yc - nearest[1]) / pitch)
+            assigned_lines_with_y.append((n, text, yc))
+    else:
+        # Marker-less: use borrowed pitch
+        assigned_lines_raw = []
+        for yc, text in text_lines:
+            n = round((yc - intercept) / pitch)
+            assigned_lines_raw.append((n, text, yc))
+
+        # Shift so first line becomes line 1
+        if assigned_lines_raw:
+            min_line = assigned_lines_raw[0][0]
+            assigned_lines_with_y = [(n - min_line + 1, text, yc) for n, text, yc in assigned_lines_raw]
+        else:
+            assigned_lines_with_y = []
+
+    # Step 2: Enforce strict monotonicity
+    monotonic_lines_with_y: list[tuple[int, str, float]] = []
+    for n, text, yc in assigned_lines_with_y:
+        if monotonic_lines_with_y and n <= monotonic_lines_with_y[-1][0]:
+            n = monotonic_lines_with_y[-1][0] + 1
+        monotonic_lines_with_y.append((n, text, yc))
+
+    if not monotonic_lines_with_y:
+        return []
+
+    # Step 3: Slot filling
+    # Emit text rows for each text line, and fill interior gaps with blank/spurious/unknown
+    result: list[tuple[int, str, str]] = []
+
+    for i, (line_n, text, yc) in enumerate(monotonic_lines_with_y):
+        # Emit this text line
+        result.append((line_n, text, "text"))
+
+        # Fill the gap to the next text line (if any)
+        if i < len(monotonic_lines_with_y) - 1:
+            next_n, next_text, next_yc = monotonic_lines_with_y[i + 1]
+            missing = next_n - line_n - 1
+
+            if missing > 0:
+                # There are interior slots between line_n and next_n
+                g = (next_yc - yc) / pitch
+                slots = slots_spanned(g)
+                blank_count = max(0, slots - 1)
+
+                if not markers:
+                    # Marker-less: all gaps are unknown
+                    for slot in range(line_n + 1, next_n):
+                        result.append((slot, "", "unknown"))
+                else:
+                    # Marker-bearing: classify by gap
+                    # Emit blank_count blanks first, then remaining spurious
+                    blanks_emitted = 0
+                    for slot in range(line_n + 1, next_n):
+                        if blanks_emitted < blank_count:
+                            result.append((slot, "", "blank"))
+                            blanks_emitted += 1
+                        else:
+                            result.append((slot, "", "spurious"))
+
+    return result
+
+
 def reconstruct_page(
     page,                       # pdfplumber Page (for .crop / .extract_text_lines)
     page_width: float,
     page_height: float,
     gutter: float,
     marker_xs: list[float],
+    markers: list[tuple[int, float]],
     pitch: float,
     intercept: float,
     left_column: int,
@@ -603,7 +774,8 @@ def reconstruct_page(
 ) -> list[Line]:
     """Crop LEFT and RIGHT columns around the dead-zoned gutter, line-extract
     each in isolation, drop the header band (predicted line < 1), and tag every
-    surviving line with its column and printed line number.
+    surviving line with its column and printed line number using marker-anchored
+    numbering.
 
     IMPORTANT #3 guard: Clamp crop bounds to [0, page_width] to prevent inverted/empty
     crops if the dead-zone is miscalibrated or the gutter is at a page edge.
@@ -625,19 +797,59 @@ def reconstruct_page(
         crops.append((right_column, page.crop((right_x0, 0, right_x1, page_height))))
 
     for column, crop in crops:
-        for ln in crop.extract_text_lines():
+        # Extract text lines and collect (y_center, text) for marker-anchored numbering
+        extracted = crop.extract_text_lines()
+        text_lines: list[tuple[float, str]] = []
+        line_y_map: dict[int, dict] = {}  # line_no -> pdfplumber line dict (for bbox recovery)
+
+        for ln in extracted:
             yc = (ln["top"] + ln["bottom"]) / 2.0
             line_no = line_at(yc, pitch, intercept)
             if line_no < 1:
                 continue   # running header / column-number header band
+            text_lines.append((yc, ln["text"]))
+            # Store the original line dict for bbox recovery (keyed by temp line number)
+            # We'll use len(text_lines)-1 as a temporary index
+            line_y_map[len(text_lines) - 1] = ln
+
+        if not text_lines:
+            continue  # No text lines to number
+
+        # Call the pure marker-anchored numbering function
+        # For markers, pass only those from this page (they're page-global, but we filter by column below)
+        numbered_slots = number_column_slots(text_lines, markers, pitch, intercept)
+
+        # Remember crop bounds for synthesized bboxes
+        crop_x0 = (0 if column == left_column else right_x0)
+        crop_x1 = (left_x1 if column == left_column else page_width)
+
+        # Convert the numbered slots back to Line objects
+        for slot_no, slot_text, slot_kind in numbered_slots:
+            # Find the corresponding original line dict for bbox (if it's a text line)
+            bbox_tuple = None
+            if slot_kind == "text":
+                # Find which text line this is (match by slot_text)
+                for idx, (yc, text) in enumerate(text_lines):
+                    if text == slot_text:
+                        ln = line_y_map[idx]
+                        bbox_tuple = (ln["x0"], ln["top"], ln["x1"], ln["bottom"])
+                        break
+            else:
+                # Non-text kind: use a synthesized bbox at the predicted slot's y
+                # y = intercept + pitch * slot_no (in page coordinates)
+                slot_y = intercept + pitch * slot_no
+                # Use the column's crop boundaries as x-coordinates
+                bbox_tuple = (crop_x0, slot_y, crop_x1, slot_y)
+
             out.append(Line(
                 column=column,
-                line=line_no,
-                text=ln["text"],
-                bbox=(ln["x0"], ln["top"], ln["x1"], ln["bottom"]),
+                line=slot_no,
+                text=slot_text,
+                bbox=bbox_tuple,
                 page_index=page_index,
-                kind="text",
+                kind=slot_kind,
             ))
+
     return out
 
 
@@ -846,7 +1058,7 @@ def build_document(pdf_path: Path) -> PatentDoc:
                     marker_xs = marker_center_xs(words, page.width)
                     pitch, intercept = fit
                     lines.extend(reconstruct_page(
-                        page, page.width, page.height, gutter, marker_xs,
+                        page, page.width, page.height, gutter, marker_xs, markers,
                         pitch, intercept, left_col, right_col, idx,
                     ))
                 # else: body page with no line-model (marker-less short claims

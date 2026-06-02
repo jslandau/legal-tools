@@ -399,12 +399,11 @@ class TestLineKind:
         for line in doc["lines"]:
             kind = line["kind"]
             text = line["text"]
+            # AC4.1 invariant: text != "" iff kind == "text"
             if kind == "text":
                 assert text != "", f"kind='text' must have non-empty text, got text='{text}'"
-            else:
-                # For blank/spurious/unknown: we'll enforce empty text in Task 2+,
-                # but for Task 1 all lines are created as kind="text" with non-empty text
-                assert text != "", f"Task 1: all lines created with kind='text' and non-empty text"
+            else:  # blank, spurious, unknown
+                assert text == "", f"kind='{kind}' must have empty text, got text='{text}'"
 
     def test_load_document_backfill_kind_old_artifact(self, tmp_path: Path):
         """AC4.3: load_document backfills kind='text' on pre-kind artifacts.

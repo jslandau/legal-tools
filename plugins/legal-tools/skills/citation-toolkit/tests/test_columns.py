@@ -185,6 +185,7 @@ class TestReconstructPageIntegration:
             page_height=height,
             gutter=gx,
             marker_xs=marker_xs,
+            markers=markers,
             pitch=pitch,
             intercept=intercept,
             left_column=5,
@@ -248,6 +249,7 @@ class TestReconstructPageIntegration:
             page_height=height,
             gutter=gx,
             marker_xs=marker_xs,
+            markers=markers,
             pitch=pitch,
             intercept=intercept,
             left_column=3,
@@ -310,6 +312,7 @@ class TestReconstructPageIntegration:
             page_height=height,
             gutter=gx,
             marker_xs=marker_xs,
+            markers=markers,
             pitch=pitch,
             intercept=intercept,
             left_column=1,
@@ -368,6 +371,7 @@ class TestReconstructPageIntegration:
             page_height=height,
             gutter=gx,
             marker_xs=marker_xs,
+            markers=markers,
             pitch=pitch,
             intercept=intercept,
             left_column=5,
@@ -408,6 +412,7 @@ class TestReconstructPageIntegration:
             page_height=height,
             gutter=gx,
             marker_xs=marker_xs,
+            markers=markers,
             pitch=pitch,
             intercept=intercept,
             left_column=1,
@@ -455,6 +460,7 @@ class TestReconstructPageIntegration:
             page_height=height,
             gutter=gx,
             marker_xs=marker_xs,
+            markers=markers,
             pitch=pitch,
             intercept=intercept,
             left_column=3,
@@ -513,6 +519,7 @@ class TestReconstructPageIntegration:
             page_height=height,
             gutter=gx,
             marker_xs=marker_xs,
+            markers=markers,
             pitch=pitch,
             intercept=intercept,
             left_column=3,
@@ -572,12 +579,14 @@ class TestDegenrateCropGuard:
 
         # Test case 1: normal gutter (should work)
         page = MockPage(width=600, height=800)
+        test_markers = [(1, 100), (2, 150), (3, 200)]  # Sample markers for the test
         lines = reconstruct_page(
             page=page,
             page_width=600,
             page_height=800,
             gutter=300,
             marker_xs=[300, 301],  # tight cluster
+            markers=test_markers,
             pitch=50,
             intercept=100,
             left_column=1,
@@ -595,6 +604,7 @@ class TestDegenrateCropGuard:
             page_height=800,
             gutter=0,
             marker_xs=[0],  # at left edge
+            markers=test_markers,
             pitch=50,
             intercept=100,
             left_column=1,
@@ -611,6 +621,7 @@ class TestDegenrateCropGuard:
             page_height=800,
             gutter=600,
             marker_xs=[600],  # at right edge
+            markers=test_markers,
             pitch=50,
             intercept=100,
             left_column=1,
@@ -717,6 +728,7 @@ class TestColumnNumberingContiguity:
                 page_height=height1,
                 gutter=gx1,
                 marker_xs=marker_xs1,
+                markers=markers1,
                 pitch=pitch1,
                 intercept=intercept1,
                 left_column=1,
@@ -744,6 +756,7 @@ class TestColumnNumberingContiguity:
                 page_height=height2,
                 gutter=gx2,
                 marker_xs=marker_xs2,
+                markers=markers2,
                 pitch=pitch2,
                 intercept=intercept2,
                 left_column=3,
