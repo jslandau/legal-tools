@@ -52,12 +52,25 @@ class Word(TypedDict):
 
 
 class Line(TypedDict):
-    """A reconstructed printed line with column and line number tags."""
+    """A reconstructed printed line with column and line number tags.
+
+    Invariant: text != "" iff kind == "text". Other kinds (blank, spurious, unknown)
+    have text == "".
+
+    kind: One of "text" (rendered line with content), "blank" (real printed empty line),
+    "spurious" (numbering-grid slot skipped by text; no real line), "unknown" (unable
+    to classify due to missing grid markers).
+    """
     column: int                                         # printed column number (1-based, global)
     line: int                                           # printed line number within the column
     text: str
     bbox: tuple[float, float, float, float]            # x0, top, x1, bottom
     page_index: int                                     # 0-based source PDF page
+    kind: str                                           # one of LINE_KINDS
+
+
+# Line kind enumeration
+LINE_KINDS = ("text", "blank", "spurious", "unknown")
 
 
 class PageFit(TypedDict):
@@ -623,6 +636,7 @@ def reconstruct_page(
                 text=ln["text"],
                 bbox=(ln["x0"], ln["top"], ln["x1"], ln["bottom"]),
                 page_index=page_index,
+                kind="text",
             ))
     return out
 
@@ -897,6 +911,9 @@ def load_document(path: Path) -> PatentDoc:
     # so the in-memory shape matches Line's contract exactly.
     for ln in data["lines"]:
         ln["bbox"] = tuple(ln["bbox"])
+        # Backfill kind for old artifacts (pre-kind schema): all existing lines
+        # in old artifacts are text lines (Task 1 creates them all as kind="text").
+        ln.setdefault("kind", "text")
     # Backfill is_body for artifacts written before the field existed: a page that
     # consumed column numbers (non-zero columns) was a body page.
     for pf in data.get("page_fits", []):

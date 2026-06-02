@@ -377,6 +377,83 @@ class TestBuildOrLoad:
         assert doc2["source_sha256"] != "0" * 64, "Rebuilt doc should have correct sha256"
 
 
+class TestLineKind:
+    """Tests for the Line schema with kind field (Task 1)."""
+
+    def test_line_kind_field_membership(self, born_digital_pdf: Path):
+        """AC4.1: All emitted Line rows have kind in LINE_KINDS."""
+        from patent_extract import build_document, LINE_KINDS
+
+        doc = build_document(born_digital_pdf)
+
+        for line in doc["lines"]:
+            assert "kind" in line, "Line should have 'kind' field"
+            assert line["kind"] in LINE_KINDS, f"kind={line['kind']} not in LINE_KINDS={LINE_KINDS}"
+
+    def test_line_kind_text_invariant(self, born_digital_pdf: Path):
+        """AC4.1 invariant: text != "" iff kind == "text"."""
+        from patent_extract import build_document
+
+        doc = build_document(born_digital_pdf)
+
+        for line in doc["lines"]:
+            kind = line["kind"]
+            text = line["text"]
+            if kind == "text":
+                assert text != "", f"kind='text' must have non-empty text, got text='{text}'"
+            else:
+                # For blank/spurious/unknown: we'll enforce empty text in Task 2+,
+                # but for Task 1 all lines are created as kind="text" with non-empty text
+                assert text != "", f"Task 1: all lines created with kind='text' and non-empty text"
+
+    def test_load_document_backfill_kind_old_artifact(self, tmp_path: Path):
+        """AC4.3: load_document backfills kind='text' on pre-kind artifacts.
+
+        This test builds a hand-crafted old-style line dict (no kind),
+        writes it as JSON, and verifies load_document adds kind='text'.
+        """
+        import json
+        from patent_extract import load_document, LINE_KINDS
+
+        # Create an old-style artifact (pre-kind)
+        old_style_doc = {
+            "patent_id": "TEST",
+            "source_path": "/fake/test.pdf",
+            "source_sha256": "0" * 64,
+            "has_text_layer": True,
+            "lines": [
+                {
+                    "column": 1,
+                    "line": 1,
+                    "text": "Sample text",
+                    "bbox": [0.0, 10.0, 100.0, 20.0],
+                    "page_index": 0,
+                    # NOTE: no "kind" field — simulating old artifact
+                }
+            ],
+            "page_fits": []
+        }
+
+        # Write as JSON to temp file (simulate old artifact)
+        artifact_path = tmp_path / "old_artifact.json"
+        with open(artifact_path, "w", encoding="utf-8") as f:
+            json.dump(old_style_doc, f)
+
+        # Load with load_document
+        loaded = load_document(artifact_path)
+
+        # Verify kind was backfilled
+        assert len(loaded["lines"]) == 1
+        line = loaded["lines"][0]
+        assert "kind" in line, "load_document should backfill 'kind'"
+        assert line["kind"] == "text", "Backfilled kind should be 'text'"
+        assert line["kind"] in LINE_KINDS, f"Backfilled kind should be in LINE_KINDS"
+        # Verify other fields unchanged
+        assert line["text"] == "Sample text"
+        assert line["column"] == 1
+        assert line["line"] == 1
+
+
 class TestBuildSubcommand:
     """Tests for the build CLI subcommand."""
 
