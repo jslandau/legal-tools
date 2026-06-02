@@ -61,13 +61,21 @@ class Line(TypedDict):
 
 
 class PageFit(TypedDict):
-    """Diagnostic for page-type classification (Phase 4)."""
+    """Diagnostic for page-type classification (Phase 4).
+
+    `is_body` drives extraction and the running column counter (is this a numbered
+    column:line page whose text we extract?). `flagged` is an independent REVIEW
+    signal (does this page warrant a human look?). They are usually opposites, but
+    a body page with a gutter cross-check disagreement is both is_body=True AND
+    flagged=True: extracted, but surfaced as suspect.
+    """
     page_index: int
     left_column: int
     right_column: int
     gutter_x: float
     pitch: float
     max_marker_residual: int
+    is_body: bool
     flagged: bool
     flag_reason: str | None
 
@@ -86,9 +94,9 @@ class PatentDoc(TypedDict):
 # with a usable text layer has a substantial total across its pages.
 #
 # NOTE: this is a DOCUMENT-LEVEL "is there any text layer at all" threshold, and
-# is intentionally distinct from Phase 4's per-page MIN_BODY_WORDS (~400), which
-# measures whether a single page is a dense two-column body page. Do not merge
-# the two — they answer different questions at different scopes.
+# is intentionally distinct from the per-page body VOTE_MIN_WORDS (one of three
+# voting signals; see is_body_page). Do not merge the two — they answer different
+# questions at different scopes.
 MIN_TOTAL_WORDS = 50
 
 
@@ -103,10 +111,26 @@ BASE_DEAD_ZONE = 6.0        # pt; minimum half-width of the gutter buffer (verif
 DEAD_ZONE_MARGIN = 3.0      # pt; added on top of the measured intra-page gutter drift
 
 # Page-type classification (Phase 4)
-MIN_BODY_WORDS = 400        # below this, not a dense two-column body page
-MIN_BODY_MARKERS = 6        # need a fittable marker set (gutter-token presence)
+MIN_BODY_WORDS = 400        # (legacy) dense two-column floor — no longer a hard gate; see classify_page
+MIN_BODY_MARKERS = 6        # (legacy) — no longer a hard gate; see classify_page
 MIN_COLUMN_MASS_FRAC = 0.15 # each side must hold at least this fraction of words (else single-column)
 SIDE_SPLIT_FRAC = 0.45      # words with center-x < 0.45*W are "left"; > 0.55*W are "right"
+
+# Body-page voting rule (revised 2026-06-01 after US8131198 tiny-claims-page evidence).
+# No single signal is sufficient: a multi-of-5 gutter marker only appears once a
+# column has >=5 lines, so a 6-line claims tail (US8131198 idx29: cols 33/34) has
+# ZERO markers — but it still carries column-number HEADERS. A page is body iff it
+# has a clean line-model fit, OR both column headers, OR >=2 of three weak signals.
+# Validated to 0 errors across 50 pages / 3 fixtures.
+VOTE_MIN_MARKERS = 2        # gutter-marker count that earns a vote
+VOTE_MIN_WORDS = 100        # word count that earns a vote
+CLEAN_FIT_MAX_RESIDUAL = 1  # a fit is "clean" if its max marker residual <= this
+
+# Column-number header detection (gutter-independent geometric anchor).
+HEADER_TOP_MAX = 78.0       # pt; column-number headers sit within this distance of the page top
+HEADER_MAX_VALUE = 999      # printed column numbers are small ints (reject body figure numbers)
+HEADER_MIN_OFFSET = 60.0    # pt; a header digit must sit at least this far from the gutter (column-center region)
+GUTTER_CROSSCHECK_TOL = 5.0 # pt; line-marker gutter vs header-midpoint must agree within this (OCR scans ~2pt)
 
 _DIGITS = re.compile(r"\d{1,3}")
 
@@ -291,6 +315,103 @@ def gutter_x(words: list[Word], page_width: float, *, band_frac: float = CENTER_
     return statistics.median(xs)
 
 
+def _header_digit_xs(words: list[Word]) -> list[float]:
+    """Center-x of every plausible column-number HEADER digit token.
+
+    Column-number headers (e.g. "33" / "34") are printed at the top of each body
+    page, one per column, sitting at the column centers. Unlike gutter markers
+    they are NOT multiples of 5 and do NOT depend on the column having >=5 lines —
+    so they exist even on a short claims tail with no gutter markers at all.
+
+    A token qualifies iff it is: (a) pure digits, (b) within HEADER_TOP_MAX of the
+    page top, (c) a small positive int (<= HEADER_MAX_VALUE). Pure function.
+    """
+    out: list[float] = []
+    for w in words:
+        t = w["text"].strip()
+        if not _DIGITS.fullmatch(t):
+            continue
+        if w["top"] >= HEADER_TOP_MAX:
+            continue
+        v = int(t)
+        if v <= 0 or v > HEADER_MAX_VALUE:
+            continue
+        out.append(_center_x(w))
+    return out
+
+
+def header_midpoint_gutter(words: list[Word], page_width: float) -> float | None:
+    """Gutter estimate from column-number header digits, independent of line markers.
+
+    The two column headers straddle the gutter symmetrically, so the midpoint of a
+    left-of-center and a right-of-center header digit estimates the gutter x. When
+    several candidates exist we pick the pair whose midpoint is closest to the page
+    center (the true gutter is near center; stray header text is not).
+
+    Returns None if there is not at least one header digit on each side of center.
+    This is the only gutter anchor available on a marker-less short claims page
+    (verified 302.94 vs line-marker gutter 303 on US8131198 idx29).
+    """
+    center = page_width / 2.0
+    xs = _header_digit_xs(words)
+    left = [x for x in xs if x < center]
+    right = [x for x in xs if x > center]
+    if not left or not right:
+        return None
+    best_mid: float | None = None
+    best_sym = float("inf")
+    for lx in left:
+        for rx in right:
+            mid = (lx + rx) / 2.0
+            sym = abs(mid - center)
+            if sym < best_sym:
+                best_sym = sym
+                best_mid = mid
+    return best_mid
+
+
+def column_labels(words: list[Word], page_width: float, gutter: float | None) -> int:
+    """Number of column-number headers present (0, 1, or 2), anchored on the gutter.
+
+    A header counts on a side iff there is a header digit at least HEADER_MIN_OFFSET
+    away from the gutter on that side (i.e. out at the column center, not a stray
+    digit hugging the gutter). Gutter-anchored rather than fixed 1/4-3/4 width
+    because page margins shift the column centers inward (US8131198 headers sit at
+    cx~186/420, not the naive 0.25/0.75 * width targets).
+
+    Returns 0 if gutter is None (cannot anchor). Pure function.
+    """
+    if gutter is None:
+        return 0
+    xs = _header_digit_xs(words)
+    has_left = any(gutter - x >= HEADER_MIN_OFFSET for x in xs)
+    has_right = any(x - gutter >= HEADER_MIN_OFFSET for x in xs)
+    return int(has_left) + int(has_right)
+
+
+def resolve_gutter(words: list[Word], page_width: float) -> tuple[float | None, bool]:
+    """Best gutter estimate plus a cross-check disagreement flag.
+
+    Strategy (decided 2026-06-01: "header-midpoint as a cross-check everywhere"):
+    - line-marker gutter is PRIMARY (unchanged for normal body pages),
+    - header-midpoint is the FALLBACK when no line markers exist (short claims tails),
+    - when BOTH exist they must agree within GUTTER_CROSSCHECK_TOL; if they disagree
+      we keep the line-marker value (more precise) but raise the disagreement flag so
+      the page can be surfaced as suspect rather than silently mis-cropped.
+
+    Returns (gutter_x_or_None, disagreement). disagreement is always False when
+    fewer than both estimates are available.
+    """
+    g_line = gutter_x(words, page_width)
+    g_header = header_midpoint_gutter(words, page_width)
+    if g_line is not None and g_header is not None:
+        disagree = abs(g_line - g_header) > GUTTER_CROSSCHECK_TOL
+        return g_line, disagree
+    if g_line is not None:
+        return g_line, False
+    return g_header, False
+
+
 def fit_line_model(markers: list[tuple[int, float]]) -> tuple[float, float] | None:
     """Robust (pitch, intercept) for y = intercept + line*pitch via Theil-Sen.
 
@@ -440,6 +561,37 @@ def column_mass_fractions(words: list[Word], page_width: float) -> tuple[float, 
     return left / n, right / n
 
 
+def is_body_page(
+    word_count: int,
+    marker_count: int,
+    label_count: int,
+    fit: tuple[float, float] | None,
+    residual: int,
+) -> bool:
+    """Voting decision: is this a numbered column:line body page?
+
+    Decided 2026-06-01 after the US8131198 tiny-claims-page evidence. No single
+    signal is sufficient (a 6-line claims tail has zero gutter markers), so a page
+    is body iff ANY of:
+      - clean line-model fit (>= MIN_MARKERS_TO_FIT markers, residual <= CLEAN_FIT_MAX_RESIDUAL)
+      - both column-number headers present (label_count >= 2)
+      - >= 2 of three weak votes: markers>=VOTE_MIN_MARKERS, label>=1, words>=VOTE_MIN_WORDS
+
+    Validated to 0 errors across 50 pages / 3 fixtures. Drawings, figure pages and
+    the dense "References Cited" front-matter page all fail (the last earns only the
+    word vote — no markers, no column-center headers — so it stays below 2 votes).
+
+    Pure function of scalars: trivially unit-testable, no PDF required.
+    """
+    clean_fit = fit is not None and marker_count >= MIN_MARKERS_TO_FIT and 0 <= residual <= CLEAN_FIT_MAX_RESIDUAL
+    if clean_fit:
+        return True
+    if label_count >= 2:
+        return True
+    votes = (marker_count >= VOTE_MIN_MARKERS) + (label_count >= 1) + (word_count >= VOTE_MIN_WORDS)
+    return votes >= 2
+
+
 def classify_page(
     words: list[Word],
     page_width: float,
@@ -449,31 +601,43 @@ def classify_page(
     page_index: int,
     left_column: int,
     right_column: int,
+    *,
+    gutter_disagreement: bool = False,
 ) -> PageFit:
     """Build the PageFit diagnostic, flagging non-body pages with a reason.
 
-    A page is a clean two-column body page only if it has enough words, a
-    fittable marker set, and both column masses populated. Any failure flags
-    the page (it is NOT extracted as body content downstream).
+    Body membership is decided by is_body_page (voting rule). A non-body page is
+    flagged and NOT extracted as body content downstream. A body page whose
+    gutter cross-check disagreed is still admitted but flagged-as-suspect in its
+    reason (so it surfaces for review without losing its column numbers).
 
     Pure function, no side effects. No pdfplumber required.
     """
+    residual = max_marker_residual(markers, *fit) if (fit and markers) else -1
+    label_count = column_labels(words, page_width, gutter)
+    body = is_body_page(len(words), len(markers), label_count, fit, residual)
+
     reason: str | None = None
-    if len(words) < MIN_BODY_WORDS:
-        reason = f"sparse page ({len(words)} words) — likely drawing or front matter"
-    elif len(markers) < MIN_BODY_MARKERS or fit is None or gutter is None:
-        reason = f"insufficient gutter markers ({len(markers)}) — not a numbered body page"
-    else:
+    if not body:
         lf, rf = column_mass_fractions(words, page_width)
-        if lf < MIN_COLUMN_MASS_FRAC or rf < MIN_COLUMN_MASS_FRAC:
-            reason = f"single-column / full-width content (mass L={lf:.2f} R={rf:.2f})"
+        reason = (
+            f"not a numbered body page (words={len(words)}, markers={len(markers)}, "
+            f"headers={label_count}, mass L={lf:.2f} R={rf:.2f})"
+        )
+    elif gutter is None:
+        # A body page with no gutter anchor at all cannot be cropped; flag it.
+        reason = "body page but no gutter anchor (no markers and no column headers)"
+        body = False
+    elif gutter_disagreement:
+        # Admitted as body, but the two gutter estimates disagree — surface it.
+        reason = "gutter cross-check disagreement (line-marker vs header midpoint)"
 
     flagged = reason is not None
     pitch = fit[0] if fit else 0.0
-    # Sentinel: -1 means "no fit / not applicable" (the page could not be
-    # fitted), distinct from a real residual where 0 == perfect. Consumers must
-    # treat negative residuals as "no measurement", never as a fit quality.
-    residual = max_marker_residual(markers, *fit) if (fit and markers) else -1
+    # residual (computed above) uses the sentinel -1 to mean "no fit / not
+    # applicable" (the page could not be fitted), distinct from a real residual
+    # where 0 == perfect. Consumers must treat negative residuals as "no
+    # measurement", never as a fit quality.
     return PageFit(
         page_index=page_index,
         left_column=left_column,
@@ -481,6 +645,7 @@ def classify_page(
         gutter_x=gutter if gutter is not None else 0.0,
         pitch=pitch,
         max_marker_residual=residual,
+        is_body=body,
         flagged=flagged,
         flag_reason=reason,
     )
@@ -543,8 +708,13 @@ def sha256_file(path: Path) -> str:
 def build_document(pdf_path: Path) -> PatentDoc:
     """Parse the PDF once into a PatentDoc. Lazy-imports pdfplumber.
 
-    Running column counter advances only for body (non-flagged) pages,
-    so drawing/front-matter pages do not consume column numbers.
+    The running column counter advances for every BODY page (PageFit.is_body),
+    so drawing/front-matter pages do not consume column numbers. A body page
+    consumes its two column numbers even when its lines cannot yet be extracted
+    (e.g. a short claims tail with column headers but no line-model markers —
+    line-number assignment for marker-less pages is deferred to the issue-#1
+    rework). Such a page is recorded with its correct columns but contributes
+    no Line rows.
     """
     import pdfplumber
 
@@ -559,7 +729,7 @@ def build_document(pdf_path: Path) -> PatentDoc:
             counts.append(len(words))
             markers = select_markers(words, page.width)
             fit = fit_line_model(markers)
-            gutter = gutter_x(words, page.width)
+            gutter, gutter_disagreement = resolve_gutter(words, page.width)
 
             # Provisional column numbers for THIS page if it turns out to be body.
             left_col = 2 * body_pages_seen + 1
@@ -568,20 +738,25 @@ def build_document(pdf_path: Path) -> PatentDoc:
             page_fit = classify_page(
                 words, page.width, markers, fit, gutter,
                 page_index=idx, left_column=left_col, right_column=right_col,
+                gutter_disagreement=gutter_disagreement,
             )
 
-            if not page_fit["flagged"] and fit is not None and gutter is not None:
-                # Reuse the Phase 2 marker-selection helper — do NOT re-inline
-                # the selection rule (single source of truth for the geometry).
-                marker_xs = marker_center_xs(words, page.width)
-                pitch, intercept = fit
-                lines.extend(reconstruct_page(
-                    page, page.width, page.height, gutter, marker_xs,
-                    pitch, intercept, left_col, right_col, idx,
-                ))
+            if page_fit["is_body"]:
+                # Body page: consume its column numbers (counter advances).
+                if fit is not None and gutter is not None:
+                    # Reuse the Phase 2 marker-selection helper — do NOT re-inline
+                    # the selection rule (single source of truth for the geometry).
+                    marker_xs = marker_center_xs(words, page.width)
+                    pitch, intercept = fit
+                    lines.extend(reconstruct_page(
+                        page, page.width, page.height, gutter, marker_xs,
+                        pitch, intercept, left_col, right_col, idx,
+                    ))
+                # else: body page with no line-model (marker-less short claims
+                # tail). Columns are consumed; line extraction deferred (issue #1).
                 body_pages_seen += 1
             else:
-                # Flagged page: keep its diagnostic but zero its columns so it
+                # Non-body page: keep its diagnostic but zero its columns so it
                 # is clear no column numbers were consumed.
                 page_fit["left_column"] = 0
                 page_fit["right_column"] = 0
@@ -639,6 +814,11 @@ def load_document(path: Path) -> PatentDoc:
     # so the in-memory shape matches Line's contract exactly.
     for ln in data["lines"]:
         ln["bbox"] = tuple(ln["bbox"])
+    # Backfill is_body for artifacts written before the field existed: a page that
+    # consumed column numbers (non-zero columns) was a body page.
+    for pf in data.get("page_fits", []):
+        if "is_body" not in pf:
+            pf["is_body"] = pf.get("left_column", 0) > 0
     return data  # type: ignore[return-value]
 
 

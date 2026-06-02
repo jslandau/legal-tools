@@ -78,38 +78,49 @@ class TestPatentDocBuild:
         # Get distinct column numbers
         cols = sorted(set(line["column"] for line in lines))
 
-        # Count body pages: pages with any lines
-        page_indices_with_lines = set(line["page_index"] for line in lines)
-        body_page_count = len(page_indices_with_lines)
+        # Count body pages by the classifier's is_body flag (the column-counter driver),
+        # not by "pages with lines" — a body page can legitimately yield no lines (a
+        # marker-less claims tail), though US9154231 has none such.
+        body_page_count = sum(1 for pf in doc["page_fits"] if pf["is_body"])
 
-        # US9154231 has 7 body pages (indices 7-13)
-        assert body_page_count == 7, f"Expected 7 body pages, got {body_page_count}"
+        # US9154231 has 8 body pages: the seven two-column body pages (indices 7-13)
+        # plus the single-column claims tail (index 14, cols 15/16).
+        assert body_page_count == 8, f"Expected 8 body pages, got {body_page_count}"
 
-        # Expected column range: 1..2*7 = 1..14
-        expected_cols = list(range(1, 2 * body_page_count + 1))
-        assert cols == expected_cols, f"Expected cols {expected_cols}, got {cols}"
+        # Populated columns are a gap-free prefix of 1..2B, EXCEPT that the very last
+        # column may be unpopulated when the final body page is a single-column claims
+        # tail (col 16 here is allocated but empty — the claims ended in col 15). So:
+        #   - no column number exceeds 2*B
+        #   - the populated columns 1..max are contiguous (no interior gaps)
+        max_col = 2 * body_page_count
+        assert cols[-1] <= max_col, f"Column {cols[-1]} exceeds allocated max {max_col}"
+        assert cols == list(range(1, cols[-1] + 1)), f"Interior gap in populated columns: {cols}"
+        # The only permitted unpopulated column is the trailing one (claims-tail right col).
+        assert cols[-1] in (max_col, max_col - 1), f"Unexpected populated-column range: {cols}"
 
-        # Verify left columns are odd, right columns are even
-        for col in cols:
-            if col in [1, 3, 5, 7, 9, 11, 13]:
-                assert col % 2 == 1, f"Left column {col} should be odd"
-            elif col in [2, 4, 6, 8, 10, 12, 14]:
-                assert col % 2 == 0, f"Right column {col} should be even"
+        # Columns are 1-based with left=odd, right=even, so the sorted contiguous
+        # prefix alternates odd, even, odd, even ... starting at 1.
+        for i, col in enumerate(cols):
+            expected_parity = 1 if i % 2 == 0 else 0
+            assert col % 2 == expected_parity, f"Column {col} at position {i} has wrong parity"
 
-    def test_build_document_ac5_3_flagged_pages_zero_columns(self, born_digital_pdf: Path):
-        """AC5.3: Flagged pages have left_column == 0 and right_column == 0."""
+    def test_build_document_ac5_3_non_body_pages_zero_columns(self, born_digital_pdf: Path):
+        """AC5.3: NON-BODY pages have left_column == 0 and right_column == 0.
+
+        Keyed on is_body, not flagged: a body page flagged for review (e.g. gutter
+        cross-check disagreement) still keeps its consumed column numbers. Only
+        non-body pages are zeroed.
+        """
         from patent_extract import build_document
 
         doc = build_document(born_digital_pdf)
-        page_fits = doc["page_fits"]
 
-        # Find flagged pages
-        flagged_pages = [pf for pf in page_fits if pf["flagged"]]
-
-        # All flagged pages should have zero column assignments
-        for pf in flagged_pages:
-            assert pf["left_column"] == 0, f"Flagged page {pf['page_index']} should have left_column==0"
-            assert pf["right_column"] == 0, f"Flagged page {pf['page_index']} should have right_column==0"
+        for pf in doc["page_fits"]:
+            if not pf["is_body"]:
+                assert pf["left_column"] == 0, f"Non-body page {pf['page_index']} should have left_column==0"
+                assert pf["right_column"] == 0, f"Non-body page {pf['page_index']} should have right_column==0"
+            else:
+                assert pf["left_column"] > 0, f"Body page {pf['page_index']} should have a column number"
 
     def test_build_document_ac5_5_no_text_layer(self, no_text_layer_pdf: Path):
         """AC5.5: build_document on no-text-layer PDF returns without raising.

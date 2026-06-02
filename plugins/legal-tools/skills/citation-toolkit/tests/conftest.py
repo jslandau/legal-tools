@@ -27,3 +27,12 @@ def ocr_pdf() -> Path:
 def no_text_layer_pdf() -> Path:
     """Raster-only PDF: extract_words() returns []."""
     return FIXTURES / "no_text_layer.pdf"
+
+
+@pytest.fixture
+def claims_tail_pdf() -> Path:
+    """US8131198 — 2012 born-digital patent (30 pages) ending in a TINY single-column
+    claims tail (index 29, cols 33/34, ~63 words, ZERO gutter line-markers). Exercises
+    the header-midpoint gutter fallback and the body-page voting rule on a page that
+    no single hard gate would admit."""
+    return FIXTURES / "US8131198.pdf"

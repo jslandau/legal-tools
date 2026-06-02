@@ -600,7 +600,8 @@ The build-once/query-many split is intentional. The geometric complexity (gutter
 ### Privacy and scope
 
 - **Local-only:** The PDF and extracted text never leave the machine. Both scripts run entirely offline.
-- **Confidence signals:** Each page's diagnostic includes `flagged` (boolean) and `flag_reason` (string), and the per-page `max_marker_residual` confidence metric. Use these to assess extraction confidence for your document before relying on its citations.
+- **Confidence signals:** Each page's diagnostic includes `is_body` (boolean — is this a numbered column:line page whose text is extracted and which consumes column numbers), `flagged` (boolean — does the page warrant a human look) and `flag_reason` (string), plus the per-page `max_marker_residual` confidence metric. `is_body` and `flagged` are usually opposites, but a body page can be both (e.g. a gutter cross-check disagreement is extracted *and* surfaced for review). Use these to assess extraction confidence before relying on a document's citations.
+- **Page classification (voting rule):** A page is body text if it has a clean gutter line-model fit, OR both column-number headers, OR at least two of {≥2 gutter markers, ≥1 column header, ≥100 words}. This admits single-column **claims tails** — including very short ones with zero multiple-of-5 gutter line-numbers, where the gutter is recovered from the column-header midpoint. (Line-number *assignment* for such marker-less pages is a known follow-up; the page is recognized and its columns allocated, but its individual lines may not yet be extracted.)
 - **Citation recognition:** Patent-cite recognition rules (determining when a string like `4:32-38` appears in text and signifying a column:line reference) are out of scope here. The cite-check skill will integrate those rules and consume these scripts' outputs.
 
 ---

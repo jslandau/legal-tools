@@ -78,55 +78,37 @@ class TestColumnMassFractions:
 class TestClassifyPageSyntheticUnit:
     """Pure unit tests for classify_page with synthetic inputs (no PDF required)."""
 
-    def test_classify_page_single_column_branch(self):
-        """AC4.2 (IMPORTANT #1): single-column flag is reachable and tested.
+    def test_classify_page_single_column_is_body(self):
+        """AC4.2 (revised 2026-06-01): a single-column page with a CLEAN line-model
+        fit is now ADMITTED as body, not flagged.
 
-        Constructs synthetic inputs that reach the single-column branch:
-        - >= MIN_BODY_WORDS (400) words
-        - >= MIN_BODY_MARKERS (6) markers
-        - Valid fit tuple (pitch, intercept)
-        - Valid gutter float
-        - Nearly all words on the left side (center_x < 0.45*page_width)
-        - Left mass > 0.15 but right mass < MIN_COLUMN_MASS_FRAC (0.15)
+        Rationale: a single-column claims tail (e.g. US9154231 idx14, US8131198 idx29)
+        is citable column:line text. The old gate flagged any single-column page; the
+        voting rule (is_body) admits it because the clean fit alone is a body signal.
 
-        Asserts flagged=True and "single-column" in flag_reason.
+        Constructs a single-column page (nearly all words left) WITH a clean fit, and
+        asserts is_body=True and not flagged.
         """
         from patent_extract import classify_page, Word
 
         page_width = 614.0
 
-        # Synthetic words: 450 total (>= MIN_BODY_WORDS=400)
-        # ~90% on left (cx < 0.45*614 = 276.3)
-        # ~10% on right (cx > 0.55*614 = 337.7)
-        # This gives left_mass ≈ 0.9, right_mass ≈ 0.1 (right < 0.15 threshold)
         left_words = [
             Word(text=f"word{i}", x0=100 + i*0.5, x1=130 + i*0.5, top=100 + i*2, bottom=110 + i*2)
-            for i in range(405)  # 405 words on left (90% of 450)
+            for i in range(405)
         ]
         right_words = [
             Word(text=f"rword{i}", x0=400 + i*0.5, x1=430 + i*0.5, top=100 + i*2, bottom=110 + i*2)
-            for i in range(45)   # 45 words on right (10% of 450)
+            for i in range(45)
         ]
         words = left_words + right_words
 
-        # Synthetic markers: 6 total (>= MIN_BODY_MARKERS=6)
-        # Format: [(line_value, y_center), ...]
-        markers = [
-            (5, 100.0),
-            (10, 150.0),
-            (15, 200.0),
-            (20, 250.0),
-            (25, 300.0),
-            (30, 350.0),
-        ]
-
-        # Valid fit tuple (pitch, intercept)
+        # Clean fit: markers lie exactly on y = 90 + 10*line (pitch=10, intercept=90)
+        # so max_marker_residual == 0 -> clean_fit vote fires.
+        markers = [(5, 140.0), (10, 190.0), (15, 240.0), (20, 290.0), (25, 340.0), (30, 390.0)]
         fit = (10.0, 90.0)
-
-        # Valid gutter (center of page)
         gutter = page_width / 2.0
 
-        # Call classify_page
         page_fit = classify_page(
             words=words,
             page_width=page_width,
@@ -138,19 +120,15 @@ class TestClassifyPageSyntheticUnit:
             right_column=2,
         )
 
-        # Verify the test lands on the single-column branch (not sparse or insufficient-markers)
-        assert len(words) >= 400, f"Expected >= 400 words, got {len(words)}"
-        assert len(markers) >= 6, f"Expected >= 6 markers, got {len(markers)}"
-
-        # Verify flagged and reason
-        assert page_fit["flagged"] is True, (
-            f"Expected flagged=True. Words={len(words)}, Markers={len(markers)}, "
+        assert page_fit["is_body"] is True, (
+            f"Clean-fit single-column page should be body. Reason={page_fit['flag_reason']}"
+        )
+        assert page_fit["flagged"] is False, (
+            f"Clean-fit single-column body page should not be flagged. "
             f"Reason={page_fit['flag_reason']}"
         )
-        assert page_fit["flag_reason"] is not None
-        assert "single-column" in page_fit["flag_reason"], (
-            f"Expected 'single-column' in flag_reason, got: {page_fit['flag_reason']}"
-        )
+        # Mutation guard: residual must be the real 0 here (clean fit), not the -1 sentinel.
+        assert page_fit["max_marker_residual"] == 0
 
     def test_classify_page_sentinel_residual_no_fit(self):
         """AC4.2 (IMPORTANT #2): -1 residual sentinel is set when fit is None.
@@ -192,10 +170,11 @@ class TestClassifyPageSyntheticUnit:
             right_column=2,
         )
 
-        # Verify flagged (due to insufficient markers)
+        # Verify non-body (450 words = 1 word vote; no markers, no headers -> < 2 votes)
+        assert page_fit["is_body"] is False, f"Expected is_body=False, got {page_fit}"
         assert page_fit["flagged"] is True, f"Expected flagged=True, got {page_fit}"
-        assert "insufficient gutter markers" in (page_fit["flag_reason"] or ""), (
-            f"Expected 'insufficient gutter markers' in reason, got: {page_fit['flag_reason']}"
+        assert "not a numbered body page" in (page_fit["flag_reason"] or ""), (
+            f"Expected 'not a numbered body page' in reason, got: {page_fit['flag_reason']}"
         )
 
         # Verify the sentinel: max_marker_residual must be -1 (not a real residual)
@@ -359,22 +338,25 @@ class TestClassifyPageIntegration:
                     right_column=2,
                 )
 
-                # AC4.2: Drawings flagged with "sparse page" reason
+                # AC4.2: Drawings are non-body and flagged.
+                assert page_fit["is_body"] is False, f"Page {page_idx} (drawing) should not be body"
                 assert page_fit["flagged"] is True, f"Page {page_idx} should be flagged"
                 assert page_fit["flag_reason"] is not None
-                assert "sparse page" in page_fit["flag_reason"], (
-                    f"Expected 'sparse page' reason on page {page_idx}, got: {page_fit['flag_reason']}"
+                assert "not a numbered body page" in page_fit["flag_reason"], (
+                    f"Expected 'not a numbered body page' reason on page {page_idx}, got: {page_fit['flag_reason']}"
                 )
 
-    def test_classify_us9154231_page_1_references_insufficient_markers(self, born_digital_pdf):
-        """AC4.2: US9154231 page 1 (references/title) flagged as 'insufficient gutter markers'.
+    def test_classify_us9154231_page_0_references_non_body(self, born_digital_pdf):
+        """AC4.2: US9154231 page 0 (title/references) is non-body despite high word count.
 
-        Page 1 (index 0) has 417 words (above MIN_BODY_WORDS=400) but only 1 marker,
-        so it fails the MIN_BODY_MARKERS=6 check and is flagged as front matter.
+        Index 0 has 417 words (1 word vote) but only 1 gutter marker and no
+        column-center headers, so it earns < 2 votes and is correctly rejected.
+        This is the key false-positive guard: a DENSE front-matter page must not be
+        admitted just because it has many words.
         """
         import pdfplumber
         from patent_extract import (
-            to_word, select_markers, gutter_x, fit_line_model,
+            to_word, select_markers, fit_line_model, resolve_gutter,
             classify_page
         )
 
@@ -384,7 +366,7 @@ class TestClassifyPageIntegration:
 
             words = [to_word(w) for w in page.extract_words()]
             markers = select_markers(words, page_width=page_width)
-            gx = gutter_x(words, page_width=page_width)
+            gx, disagree = resolve_gutter(words, page_width=page_width)
             fit_result = fit_line_model(markers)
 
             page_fit = classify_page(
@@ -396,25 +378,28 @@ class TestClassifyPageIntegration:
                 page_index=0,
                 left_column=1,
                 right_column=2,
+                gutter_disagreement=disagree,
             )
 
-            # AC4.2: References/title page flagged with "insufficient gutter markers"
-            assert page_fit["flagged"] is True, "Page 1 (references) should be flagged"
+            assert page_fit["is_body"] is False, "Page 0 (references) should not be body"
+            assert page_fit["flagged"] is True, "Page 0 (references) should be flagged"
             assert page_fit["flag_reason"] is not None
-            assert "insufficient gutter markers" in page_fit["flag_reason"], (
-                f"Expected 'insufficient gutter markers' reason on page 1, got: {page_fit['flag_reason']}"
+            assert "not a numbered body page" in page_fit["flag_reason"], (
+                f"Expected 'not a numbered body page' reason on page 0, got: {page_fit['flag_reason']}"
             )
 
-    def test_classify_us9154231_page_15_sparse_claims_tail(self, born_digital_pdf):
-        """AC4.2: US9154231 page 15 (claims-tail) flagged as 'sparse page'.
+    def test_classify_us9154231_page_14_single_column_claims_is_body(self, born_digital_pdf):
+        """AC4.2 (revised 2026-06-01): US9154231 page 15 (index 14) single-column
+        claims tail is now ADMITTED as body, not flagged.
 
-        Page 15 (index 14) has only 224 words, below MIN_BODY_WORDS=400, so it is
-        flagged as sparse (claims section typically appears at end with reduced density).
+        Index 14 has only 224 words (below the old MIN_BODY_WORDS=400 gate) and an
+        empty right column, but it has a clean gutter line-model fit (markers 10,15,
+        25,30; residual 0). It is citable as columns 15/16, so it must be body.
         """
         import pdfplumber
         from patent_extract import (
-            to_word, select_markers, gutter_x, fit_line_model,
-            classify_page
+            to_word, select_markers, fit_line_model, resolve_gutter,
+            classify_page, max_marker_residual
         )
 
         with pdfplumber.open(str(born_digital_pdf)) as pdf:
@@ -423,7 +408,7 @@ class TestClassifyPageIntegration:
 
             words = [to_word(w) for w in page.extract_words()]
             markers = select_markers(words, page_width=page_width)
-            gx = gutter_x(words, page_width=page_width)
+            gx, disagree = resolve_gutter(words, page_width=page_width)
             fit_result = fit_line_model(markers)
 
             page_fit = classify_page(
@@ -433,16 +418,23 @@ class TestClassifyPageIntegration:
                 fit=fit_result,
                 gutter=gx,
                 page_index=14,
-                left_column=1,
-                right_column=2,
+                left_column=15,
+                right_column=16,
+                gutter_disagreement=disagree,
             )
 
-            # AC4.2: Sparse page flagged with "sparse page" reason
-            assert page_fit["flagged"] is True, "Page 15 (claims-tail) should be flagged"
-            assert page_fit["flag_reason"] is not None
-            assert "sparse page" in page_fit["flag_reason"], (
-                f"Expected 'sparse page' reason on page 15, got: {page_fit['flag_reason']}"
+            # Sanity on the inputs (mutation guard): it really is the short tail with a clean fit.
+            assert len(words) < 400, f"Expected sparse claims tail, got {len(words)} words"
+            assert fit_result is not None
+            assert max_marker_residual(markers, *fit_result) == 0
+
+            assert page_fit["is_body"] is True, (
+                f"Single-column claims tail should be body. Reason={page_fit['flag_reason']}"
             )
+            assert page_fit["flagged"] is False, (
+                f"Single-column claims tail should not be flagged. Reason={page_fit['flag_reason']}"
+            )
+            assert page_fit["left_column"] == 15 and page_fit["right_column"] == 16
 
     def test_classify_us4731298_page_0_title_flagged(self, ocr_pdf):
         """AC4.2: US4731298 page 0 (title) is flagged."""
@@ -483,21 +475,19 @@ class TestPageClassPartitionOracle:
     def test_us9154231_page_partition_oracle(self, born_digital_pdf):
         """Full-document oracle: verify every page of US9154231 matches expected partition.
 
-        Expected partition (derived from actual classify_page output):
-        - Not flagged: indices 7-13 (body pages, printed 8-14)
-        - Flagged: indices 0-6, 14 (front matter, drawings, claims-tail)
-
-        Note: Phase file claimed 6-12, but actual partition is 7-13. Page 6 (index 6)
-        has only 25 words and is flagged as sparse (frontispiece/toc).
+        Expected partition (revised 2026-06-01, voting rule):
+        - Body (not flagged): indices 7-14 — the seven two-column body pages PLUS the
+          single-column claims tail at index 14 (cols 15/16).
+        - Non-body (flagged): indices 0-6 (title, references, drawings, figure page).
         """
         import pdfplumber
         from patent_extract import (
-            to_word, select_markers, gutter_x, fit_line_model,
+            to_word, select_markers, fit_line_model, resolve_gutter,
             classify_page
         )
 
-        not_flagged_expected = {7, 8, 9, 10, 11, 12, 13}  # body pages (indices 7-13)
-        flagged_expected = {0, 1, 2, 3, 4, 5, 6, 14}      # all others
+        body_expected = {7, 8, 9, 10, 11, 12, 13, 14}  # body pages incl. claims tail
+        non_body_expected = {0, 1, 2, 3, 4, 5, 6}      # front matter / drawings
 
         with pdfplumber.open(str(born_digital_pdf)) as pdf:
             for page_idx in range(len(pdf.pages)):
@@ -506,7 +496,7 @@ class TestPageClassPartitionOracle:
 
                 words = [to_word(w) for w in page.extract_words()]
                 markers = select_markers(words, page_width=page_width)
-                gx = gutter_x(words, page_width=page_width)
+                gx, disagree = resolve_gutter(words, page_width=page_width)
                 fit_result = fit_line_model(markers)
 
                 page_fit = classify_page(
@@ -518,13 +508,20 @@ class TestPageClassPartitionOracle:
                     page_index=page_idx,
                     left_column=1,  # placeholder
                     right_column=2,  # placeholder
+                    gutter_disagreement=disagree,
                 )
 
-                if page_idx in not_flagged_expected:
+                if page_idx in body_expected:
+                    assert page_fit["is_body"] is True, (
+                        f"Page {page_idx} expected body, but got non-body: {page_fit['flag_reason']}"
+                    )
                     assert page_fit["flagged"] is False, (
                         f"Page {page_idx} expected NOT flagged, but got flagged: {page_fit['flag_reason']}"
                     )
-                elif page_idx in flagged_expected:
+                elif page_idx in non_body_expected:
+                    assert page_fit["is_body"] is False, (
+                        f"Page {page_idx} expected non-body, but got body"
+                    )
                     assert page_fit["flagged"] is True, (
                         f"Page {page_idx} expected flagged, but got NOT flagged"
                     )
