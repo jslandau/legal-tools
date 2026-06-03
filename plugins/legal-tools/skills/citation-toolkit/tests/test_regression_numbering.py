@@ -78,8 +78,6 @@ class TestRegressionNumberingInvariants:
         For US9154231, every column's emitted lines must have line numbers in
         strictly ascending order with no repeats.
         """
-        from patent_extract import LINE_KINDS
-
         doc = all_fixtures["US9154231"]
 
         # Group lines by column
