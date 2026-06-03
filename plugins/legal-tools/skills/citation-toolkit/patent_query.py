@@ -11,12 +11,16 @@ or "col:start-col2:end" (cross-column). Examples:
   - "4:65-5:3" → column 4 line 65 through column 5 line 3 (cross-column)
 
 Blank line handling:
-  US patents number EVERY physical line slot, including blank spacing lines around
-  centered headings. Some interior line numbers are therefore absent from the artifact
-  (no text-bearing line at that slot). These blank interior lines are rendered as
-  empty strings in the output, so the result is isomorphic to the printed page.
-  Example: if column 3 line 13 is blank, looking up "3:12-14" returns three lines
-  joined by newlines, with the middle one empty: "line12\n\nline14".
+  US patents number EVERY physical line slot, including blank spacing lines. The
+  artifact's kind field (added Phase 3) controls rendering per slot:
+  - kind="text": rendered as the slot's text
+  - kind="blank": a true blank slot interior to a span, rendered as "" (preserves the
+    printed vertical gap)
+  - kind="spurious" or "unknown": grid artifacts, skipped silently (no output, no blank)
+  - absent slot (not in artifact): CiteError (out of range)
+  A small span (< AMBIGUITY_MAX_SPAN lines) or single cite that touches a spurious/
+  unknown slot raises AmbiguousCiteError with the likely-intended text. At spans
+  >= AMBIGUITY_MAX_SPAN, interior artifacts are skipped normally.
 
 Local only: reads a local artifact, makes no network calls.
 
@@ -32,6 +36,9 @@ Usage:
     python3 patent_query.py --artifact us9154231.json --cite 4:65-5:3
 
     # Span with interior blank line (rendered as blank):
+    python3 patent_query.py --artifact us9154231.json --cite 3:49-51
+
+    # Ambiguous cite (small span touching spurious slot; exit 3):
     python3 patent_query.py --artifact us9154231.json --cite 3:12-14
 
 Exit codes:
@@ -110,6 +117,27 @@ class AmbiguousCiteError(ValueError):
 _CITE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*(?:-\s*(?:(\d+)\s*:)?(\d+)\s*)?$")
 
 
+def _build_index(doc: dict) -> tuple[dict[int, dict[int, tuple[str, str]]], dict[int, int]]:
+    """Build per-column index from artifact.
+
+    Returns:
+    - by_column: {col: {line: (text, kind)}}
+    - max_line_by_column: {col: max_line}
+
+    The kind defaults to "text" for backward compatibility (Phase 1 rows).
+    """
+    by_column = {}
+    max_line_by_column = {}
+    for ln in doc["lines"]:
+        col = ln["column"]
+        line_num = ln["line"]
+        if col not in by_column:
+            by_column[col] = {}
+        by_column[col][line_num] = (ln["text"], ln.get("kind", "text"))
+        max_line_by_column[col] = max(max_line_by_column.get(col, 0), line_num)
+    return by_column, max_line_by_column
+
+
 def physical_lines_from(
     slots_for_col: dict[int, tuple[str, str]], start_line: int, count: int
 ) -> str:
@@ -185,15 +213,7 @@ def _collect_span_slots(
 
     Raises CiteError if any referenced column is absent or any line is out of range.
     """
-    by_column = {}
-    max_line_by_column = {}
-    for ln in doc["lines"]:
-        col = ln["column"]
-        line_num = ln["line"]
-        if col not in by_column:
-            by_column[col] = {}
-        by_column[col][line_num] = (ln["text"], ln.get("kind", "text"))
-        max_line_by_column[col] = max(max_line_by_column.get(col, 0), line_num)
+    by_column, max_line_by_column = _build_index(doc)
 
     slots: dict[tuple[int, int], tuple[str, str]] = {}
     width = 0
@@ -263,15 +283,7 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
     - A small span (< AMBIGUITY_MAX_SPAN) touches a spurious/unknown slot
     """
     # Build per-column index
-    by_column = {}
-    max_line_by_column = {}
-    for ln in doc["lines"]:
-        col = ln["column"]
-        line_num = ln["line"]
-        if col not in by_column:
-            by_column[col] = {}
-        by_column[col][line_num] = (ln["text"], ln.get("kind", "text"))
-        max_line_by_column[col] = max(max_line_by_column.get(col, 0), line_num)
+    by_column, max_line_by_column = _build_index(doc)
 
     # Collect span slots and check range/column presence (CiteError before gate)
     slots, width = _collect_span_slots(doc, start_col, start_line, end_col, end_line)
@@ -302,7 +314,7 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
                 cite=(start_col, start_line, end_col, end_line),
                 reason="cited line is a numbering-grid slot, not a printed line",
                 likely_text=likely_text,
-                neighbors=(above_text, below_text) if above_text and below_text else tuple(filter(None, [above_text, below_text])),
+                neighbors=tuple(filter(None, (above_text, below_text))),
             )
 
     # GATE 2: Small span touching spurious/unknown
