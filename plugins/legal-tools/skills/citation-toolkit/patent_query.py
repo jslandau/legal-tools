@@ -34,6 +34,13 @@ Usage:
     # Span with interior blank line (rendered as blank):
     python3 patent_query.py --artifact us9154231.json --cite 3:12-14
 
+Exit codes:
+  0: success
+  1: citation error (malformed, out of range)
+  2: artifact not found or unreadable
+  3: ambiguous citation (small span or single cite touching spurious/unknown slot;
+     likely-intended text provided in diagnostic)
+
 Output: the resolved text on stdout. Errors go to stderr (exit non-zero).
 """
 import argparse
@@ -43,8 +50,48 @@ import sys
 from pathlib import Path
 
 
+# Threshold below which a span is considered "small" for ambiguity detection.
+# Humans count at small spans (1-4 lines, visually verify each slot);
+# at large spans (5+ lines) they anchor visually without counting, so spurious
+# slots interior to large spans are not ambiguous.
+AMBIGUITY_MAX_SPAN = 5
+
+
 class CiteError(ValueError):
     """Malformed citation or out-of-range span."""
+
+
+class AmbiguousCiteError(ValueError):
+    """Citation touches a numbering-grid artifact (spurious/unknown slot).
+
+    Raised when:
+    - A single cite targets a spurious/unknown slot
+    - A small span (< AMBIGUITY_MAX_SPAN lines) touches a spurious/unknown slot
+
+    Carries structured diagnostic fields:
+    - cite: the citation string or 4-tuple
+    - reason: human-readable explanation
+    - likely_text: the likely-intended text (N consecutive physical lines
+      at the start, where N = span width for spans, or both neighbors for singles)
+    - neighbors: tuple of adjacent text lines (for single-cite case)
+    """
+
+    def __init__(
+        self,
+        cite: str | tuple,
+        reason: str,
+        likely_text: str,
+        neighbors: tuple[str, ...] | None = None,
+    ) -> None:
+        self.cite = cite
+        self.reason = reason
+        self.likely_text = likely_text
+        self.neighbors = neighbors or ()
+        super().__init__(reason)
+
+    def __str__(self) -> str:
+        """Return a readable diagnostic message."""
+        return f"ambiguous cite {self.cite}: {self.reason}"
 
 
 # Regex to parse citations:
@@ -61,6 +108,32 @@ class CiteError(ValueError):
 #     (\d+)                   — end line (group 4)
 #   \s*)?$                    — end of string
 _CITE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*(?:-\s*(?:(\d+)\s*:)?(\d+)\s*)?$")
+
+
+def physical_lines_from(
+    slots_for_col: dict[int, tuple[str, str]], start_line: int, count: int
+) -> str:
+    """Extract the next `count` text-kind lines at or after `start_line`.
+
+    slots_for_col: dict mapping line number to (text, kind) tuple
+    start_line: first line number to consider
+    count: number of text lines to extract
+
+    Returns: the `count` consecutive text lines joined by newline,
+    skipping blank/spurious/unknown slots. If fewer than `count` text lines
+    exist at or after `start_line`, return what exists.
+    """
+    result = []
+    line = start_line
+    # Use a safety bound to avoid infinite loops on sparse data
+    max_search = max(slots_for_col.keys()) + count if slots_for_col else start_line + count
+    while len(result) < count and line <= max_search:
+        if line in slots_for_col:
+            text, kind = slots_for_col[line]
+            if kind == "text":
+                result.append(text)
+        line += 1
+    return "\n".join(result)
 
 
 def parse_cite(cite: str) -> tuple[int, int, int, int]:
@@ -118,7 +191,7 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
     - Any referenced column is absent from the artifact
     - start_line > max_line(start_col) or end_line > max_line(end_col) (out of range)
     """
-    # Build per-column {line: text} index and compute max_line for each column.
+    # Build per-column {line: (text, kind)} index and compute max_line for each column.
     # Per-call rebuild is intentional for current build-once/query-occasionally usage;
     # if cite-check batches many lookups, memoizing this index is the optimization.
     by_column = {}
@@ -128,7 +201,8 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
         line_num = ln["line"]
         if col not in by_column:
             by_column[col] = {}
-        by_column[col][line_num] = ln["text"]
+        # Store (text, kind) tuple; kind defaults to "text" for backcompat
+        by_column[col][line_num] = (ln["text"], ln.get("kind", "text"))
         max_line_by_column[col] = max(max_line_by_column.get(col, 0), line_num)
 
     lines_to_join = []
@@ -149,7 +223,8 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
         # Collect lines, rendering blanks as empty strings
         for ln in range(start_line, end_line + 1):
             if ln in col_lines:
-                lines_to_join.append(col_lines[ln])
+                text, kind = col_lines[ln]
+                lines_to_join.append(text)
             else:
                 # Blank interior line: render as empty string
                 lines_to_join.append("")
@@ -168,7 +243,8 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
         # Collect from start_line to max of start_col, rendering blanks as ""
         for ln in range(start_line, max_start_col + 1):
             if ln in col_lines:
-                lines_to_join.append(col_lines[ln])
+                text, kind = col_lines[ln]
+                lines_to_join.append(text)
             else:
                 lines_to_join.append("")
 
@@ -180,7 +256,8 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
             max_col_line = max_line_by_column[col]
             for ln in range(1, max_col_line + 1):
                 if ln in col_lines:
-                    lines_to_join.append(col_lines[ln])
+                    text, kind = col_lines[ln]
+                    lines_to_join.append(text)
                 else:
                     lines_to_join.append("")
 
@@ -197,7 +274,8 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
         # Collect from 1 to end_line of end_col, rendering blanks as ""
         for ln in range(1, end_line + 1):
             if ln in col_lines:
-                lines_to_join.append(col_lines[ln])
+                text, kind = col_lines[ln]
+                lines_to_join.append(text)
             else:
                 lines_to_join.append("")
 
