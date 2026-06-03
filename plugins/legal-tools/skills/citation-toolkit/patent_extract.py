@@ -93,6 +93,29 @@ class PageFit(TypedDict):
     flag_reason: str | None
 
 
+class ColumnDiagnostic(TypedDict):
+    """Per-column CLEAN/NOISY diagnostic for text-line signal quality.
+
+    Computed only for marker-bearing columns (where markers are non-empty).
+    This diagnostic is purely informational and does NOT affect line numbering
+    or kind classification.
+
+    Attributes:
+        page_index: 0-based source PDF page index.
+        column: printed column number (1-based, global).
+        clean: True if text-line signal is clean (stable spacing), False if noisy
+               (fragmented OCR with implausibly tiny gaps). Short columns (< 3 gaps)
+               are always considered clean.
+        frac_clean: Fraction of consecutive gaps within [BLANK_GAP_LO, BLANK_GAP_HI].
+        frac_tiny: Fraction of consecutive gaps below TINY_GAP_FRAC_CUTOFF.
+    """
+    page_index: int
+    column: int
+    clean: bool
+    frac_clean: float
+    frac_tiny: float
+
+
 class PatentDoc(TypedDict):
     """Complete reconstructed patent document with lines and diagnostics."""
     patent_id: str
@@ -101,6 +124,7 @@ class PatentDoc(TypedDict):
     has_text_layer: bool
     lines: list[Line]
     page_fits: list[PageFit]
+    column_diagnostics: list[ColumnDiagnostic]
 
 
 # Body pages carry hundreds of words; image/empty pages carry zero. A document
@@ -547,6 +571,31 @@ def column_signal_is_clean(gap_ratios: list[float]) -> bool:
     return frac_clean >= CLEAN_GAP_FRAC and frac_tiny <= TINY_GAP_FRAC
 
 
+def gap_fractions_for_clean_diagnostic(gap_ratios: list[float]) -> tuple[float, float]:
+    """Pure helper: compute diagnostic fractions (frac_clean, frac_tiny) for a column.
+
+    Extracted as a pure function so the diagnostic fractions can be computed and tested
+    independently of whether they're recorded. Reuses the same constants as
+    column_signal_is_clean for consistency.
+
+    Args:
+        gap_ratios: list of gap/pitch ratios for a single column's consecutive text lines.
+
+    Returns:
+        Tuple of (frac_clean, frac_tiny):
+        - frac_clean: fraction of gaps in [BLANK_GAP_LO, BLANK_GAP_HI]
+        - frac_tiny: fraction of gaps below TINY_GAP_FRAC_CUTOFF
+        Both are 0.0 for empty/single-element gap_ratios.
+    """
+    if not gap_ratios:
+        return 0.0, 0.0
+
+    frac_clean = sum(1 for g in gap_ratios if BLANK_GAP_LO <= g <= BLANK_GAP_HI) / len(gap_ratios)
+    frac_tiny = sum(1 for g in gap_ratios if g < TINY_GAP_FRAC_CUTOFF) / len(gap_ratios)
+
+    return frac_clean, frac_tiny
+
+
 def dead_zone_halfwidth(marker_xs: list[float]) -> float:
     """Half-width of the gutter buffer. Covers the page's measured gutter drift.
 
@@ -771,17 +820,26 @@ def reconstruct_page(
     left_column: int,
     right_column: int,
     page_index: int,
-) -> list[Line]:
+) -> tuple[list[Line], list[ColumnDiagnostic]]:
     """Crop LEFT and RIGHT columns around the dead-zoned gutter, line-extract
     each in isolation, drop the header band (predicted line < 1), and tag every
     surviving line with its column and printed line number using marker-anchored
     numbering.
+
+    Also computes per-column CLEAN/NOISY diagnostic for marker-bearing columns.
+    The diagnostic is purely informational and does NOT affect line numbering.
+
+    Returns:
+        Tuple of (lines, column_diagnostics) where:
+        - lines: list of reconstructed Line objects
+        - column_diagnostics: list of ColumnDiagnostic objects (one per marker-bearing column)
 
     IMPORTANT #3 guard: Clamp crop bounds to [0, page_width] to prevent inverted/empty
     crops if the dead-zone is miscalibrated or the gutter is at a page edge.
     """
     dz = dead_zone_halfwidth(marker_xs)
     out: list[Line] = []
+    diagnostics: list[ColumnDiagnostic] = []
 
     # Clamp crop bounds to valid page coordinates
     left_x0 = 0
@@ -819,6 +877,29 @@ def reconstruct_page(
         # For markers, pass only those from this page (they're page-global, but we filter by column below)
         numbered_slots = number_column_slots(text_lines, markers, pitch, intercept)
 
+        # Compute CLEAN/NOISY diagnostic for marker-bearing columns only
+        if markers:
+            # Extract y-centers from text_lines (already sorted in ascending order)
+            y_centers = [yc for yc, _ in text_lines]
+            gap_ratios = line_gaps_in_pitch(y_centers, pitch)
+            clean = column_signal_is_clean(gap_ratios)
+            frac_clean, frac_tiny = gap_fractions_for_clean_diagnostic(gap_ratios)
+
+            diagnostic = ColumnDiagnostic(
+                page_index=page_index,
+                column=column,
+                clean=clean,
+                frac_clean=frac_clean,
+                frac_tiny=frac_tiny,
+            )
+            diagnostics.append(diagnostic)
+
+            # Emit stderr warning if noisy
+            if not clean:
+                print(f"NOISY column {column} on page {page_index}: "
+                      f"frac_clean={frac_clean:.2f} frac_tiny={frac_tiny:.2f}",
+                      file=sys.stderr)
+
         # Remember crop bounds for synthesized bboxes
         crop_x0 = (0 if column == left_column else right_x0)
         crop_x1 = (left_x1 if column == left_column else page_width)
@@ -850,7 +931,7 @@ def reconstruct_page(
                 kind=slot_kind,
             ))
 
-    return out
+    return out, diagnostics
 
 
 def column_mass_fractions(words: list[Word], page_width: float) -> tuple[float, float]:
@@ -1024,11 +1105,14 @@ def build_document(pdf_path: Path) -> PatentDoc:
     line-number assignment for marker-less pages is deferred to the issue-#1
     rework). Such a page is recorded with its correct columns but contributes
     no Line rows.
+
+    Also collects per-column CLEAN/NOISY diagnostics for all marker-bearing columns.
     """
     import pdfplumber
 
     lines: list[Line] = []
     page_fits: list[PageFit] = []
+    column_diagnostics: list[ColumnDiagnostic] = []
     counts: list[int] = []
     body_pages_seen = 0   # k: this many body pages processed so far
 
@@ -1057,10 +1141,12 @@ def build_document(pdf_path: Path) -> PatentDoc:
                     # the selection rule (single source of truth for the geometry).
                     marker_xs = marker_center_xs(words, page.width)
                     pitch, intercept = fit
-                    lines.extend(reconstruct_page(
+                    page_lines, page_diags = reconstruct_page(
                         page, page.width, page.height, gutter, marker_xs, markers,
                         pitch, intercept, left_col, right_col, idx,
-                    ))
+                    )
+                    lines.extend(page_lines)
+                    column_diagnostics.extend(page_diags)
                 # else: body page with no line-model (marker-less short claims
                 # tail). Columns are consumed; line extraction deferred (issue #1).
                 body_pages_seen += 1
@@ -1079,6 +1165,7 @@ def build_document(pdf_path: Path) -> PatentDoc:
         has_text_layer=has_text_layer(counts),
         lines=lines,
         page_fits=page_fits,
+        column_diagnostics=column_diagnostics,
     )
 
 
@@ -1116,7 +1203,13 @@ def write_document(doc: PatentDoc, out_path: Path) -> None:
 
 
 def load_document(path: Path) -> PatentDoc:
-    """Load PatentDoc from JSON, normalizing bbox lists to tuples."""
+    """Load PatentDoc from JSON, normalizing bbox lists to tuples.
+
+    Backfills missing fields for old artifacts:
+    - kind: all existing lines default to "text" (pre-kind schema)
+    - is_body: inferred from column numbers (earlier PageFit schema)
+    - column_diagnostics: empty list (pre-diagnostic schema)
+    """
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     # JSON has no tuples: bbox round-trips as a list. Normalize back to tuple
@@ -1131,6 +1224,9 @@ def load_document(path: Path) -> PatentDoc:
     for pf in data.get("page_fits", []):
         if "is_body" not in pf:
             pf["is_body"] = pf.get("left_column", 0) > 0
+    # Backfill column_diagnostics for old artifacts (pre-diagnostic schema):
+    # no diagnostics were computed, so an empty list is correct.
+    data.setdefault("column_diagnostics", [])
     return data  # type: ignore[return-value]
 
 

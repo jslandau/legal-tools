@@ -179,7 +179,7 @@ class TestReconstructPageIntegration:
             assert right_header == 6, f"Expected right column header 6, got {right_header}"
 
         # Reconstruct with columns 5 (left), 6 (right)
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=width,
             page_height=height,
@@ -243,7 +243,7 @@ class TestReconstructPageIntegration:
             assert left_header == 3, f"Expected left column header 3, got {left_header}"
             assert right_header == 4, f"Expected right column header 4, got {right_header}"
 
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=width,
             page_height=height,
@@ -306,7 +306,7 @@ class TestReconstructPageIntegration:
                 # This is lenient because the left "1" is optional.
                 pass
 
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=width,
             page_height=height,
@@ -365,7 +365,7 @@ class TestReconstructPageIntegration:
             assert left_header == 5, f"Expected left column header 5, got {left_header}"
             assert right_header == 6, f"Expected right column header 6, got {right_header}"
 
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=width,
             page_height=height,
@@ -406,7 +406,7 @@ class TestReconstructPageIntegration:
             assert fit_result is not None
             pitch, intercept = fit_result
 
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=width,
             page_height=height,
@@ -454,7 +454,7 @@ class TestReconstructPageIntegration:
             assert fit_result is not None
             pitch, intercept = fit_result
 
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=width,
             page_height=height,
@@ -513,7 +513,7 @@ class TestReconstructPageIntegration:
             assert fit_result is not None
             pitch, intercept = fit_result
 
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=width,
             page_height=height,
@@ -580,7 +580,7 @@ class TestDegenrateCropGuard:
         # Test case 1: normal gutter (should work)
         page = MockPage(width=600, height=800)
         test_markers = [(1, 100), (2, 150), (3, 200)]  # Sample markers for the test
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=600,
             page_height=800,
@@ -598,7 +598,7 @@ class TestDegenrateCropGuard:
 
         # Test case 2: edge gutter at left (gutter=0, dz=6 would give left_x1 = -6)
         # Should clamp to [0, 0], skipping left column
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=600,
             page_height=800,
@@ -615,7 +615,7 @@ class TestDegenrateCropGuard:
 
         # Test case 3: edge gutter at right (gutter=600, dz=6 would give right_x0 = 606 > 600)
         # Should clamp to [600, 600], skipping right column
-        lines = reconstruct_page(
+        lines, _ = reconstruct_page(
             page=page,
             page_width=600,
             page_height=800,
@@ -722,7 +722,7 @@ class TestColumnNumberingContiguity:
             assert fit1 is not None
             pitch1, intercept1 = fit1
 
-            lines1 = reconstruct_page(
+            lines1, _ = reconstruct_page(
                 page=page1,
                 page_width=width1,
                 page_height=height1,
@@ -750,7 +750,7 @@ class TestColumnNumberingContiguity:
             assert fit2 is not None
             pitch2, intercept2 = fit2
 
-            lines2 = reconstruct_page(
+            lines2, _ = reconstruct_page(
                 page=page2,
                 page_width=width2,
                 page_height=height2,

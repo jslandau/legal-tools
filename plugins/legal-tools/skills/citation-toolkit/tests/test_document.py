@@ -530,3 +530,133 @@ class TestBuildSubcommand:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         assert "build" in captured.out.lower()
+
+
+class TestColumnDiagnostics:
+    """Tests for per-column CLEAN/NOISY diagnostics (Step 4b)."""
+
+    def test_column_diagnostics_field_present_us9154231(self, born_digital_pdf: Path):
+        """column_diagnostics field is present and populated in built document."""
+        from patent_extract import build_document
+
+        doc = build_document(born_digital_pdf)
+
+        # Verify field exists
+        assert "column_diagnostics" in doc, "PatentDoc should have column_diagnostics field"
+        assert isinstance(doc["column_diagnostics"], list), "column_diagnostics should be a list"
+
+        # US9154231 has multiple body pages with markers, so should have diagnostics
+        assert len(doc["column_diagnostics"]) > 0, "US9154231 should have column diagnostics"
+
+    def test_column_diagnostics_structure(self, born_digital_pdf: Path):
+        """Each column diagnostic has required fields with correct types."""
+        from patent_extract import build_document
+
+        doc = build_document(born_digital_pdf)
+        diags = doc["column_diagnostics"]
+
+        assert len(diags) > 0, "Expected at least one diagnostic"
+
+        for diag in diags:
+            # Check required fields
+            assert "page_index" in diag, "Diagnostic must have page_index"
+            assert "column" in diag, "Diagnostic must have column"
+            assert "clean" in diag, "Diagnostic must have clean flag"
+            assert "frac_clean" in diag, "Diagnostic must have frac_clean"
+            assert "frac_tiny" in diag, "Diagnostic must have frac_tiny"
+
+            # Check types
+            assert isinstance(diag["page_index"], int), "page_index should be int"
+            assert isinstance(diag["column"], int), "column should be int"
+            assert isinstance(diag["clean"], bool), "clean should be bool"
+            assert isinstance(diag["frac_clean"], float), "frac_clean should be float"
+            assert isinstance(diag["frac_tiny"], float), "frac_tiny should be float"
+
+            # Check ranges
+            assert 0 <= diag["frac_clean"] <= 1.0, "frac_clean should be in [0, 1]"
+            assert 0 <= diag["frac_tiny"] <= 1.0, "frac_tiny should be in [0, 1]"
+
+    def test_column_diagnostics_us9154231_col3_clean(self, born_digital_pdf: Path):
+        """US9154231 col3 on page 8 should be CLEAN with high frac_clean."""
+        from patent_extract import build_document
+
+        doc = build_document(born_digital_pdf)
+
+        # Find diagnostic for page 8 (index 8), column 3
+        diag_col3 = next(
+            (d for d in doc["column_diagnostics"]
+             if d["page_index"] == 8 and d["column"] == 3),
+            None
+        )
+
+        assert diag_col3 is not None, "Should have diagnostic for col3 on page 8"
+        assert diag_col3["clean"] is True, "US9154231 col3 should be CLEAN"
+        assert diag_col3["frac_clean"] >= 0.9, "col3 should have high frac_clean (born-digital)"
+        assert diag_col3["frac_tiny"] == 0.0, "col3 should have no tiny gaps"
+
+    def test_column_diagnostics_us4731298_all_clean(self, ocr_pdf: Path):
+        """US4731298 all marker-bearing columns should be CLEAN (OCR but stable)."""
+        from patent_extract import build_document
+
+        doc = build_document(ocr_pdf)
+
+        assert len(doc["column_diagnostics"]) > 0, "US4731298 should have diagnostics"
+
+        # All should be CLEAN (US4731298 is a clean OCR scan)
+        for diag in doc["column_diagnostics"]:
+            assert diag["clean"] is True, (
+                f"US4731298 col {diag['column']} on page {diag['page_index']} "
+                f"should be CLEAN: frac_clean={diag['frac_clean']:.3f}"
+            )
+
+    def test_load_document_backfill_column_diagnostics_old_artifact(self, tmp_path: Path):
+        """load_document backfills column_diagnostics=[] on pre-diagnostic artifacts."""
+        import json
+        from patent_extract import load_document
+
+        # Create old-style artifact (pre-diagnostic)
+        old_artifact = {
+            "patent_id": "TEST",
+            "source_path": "/fake/test.pdf",
+            "source_sha256": "0" * 64,
+            "has_text_layer": True,
+            "lines": [],
+            "page_fits": [],
+            # NOTE: no "column_diagnostics" field
+        }
+
+        artifact_path = tmp_path / "old_artifact.json"
+        with open(artifact_path, "w", encoding="utf-8") as f:
+            json.dump(old_artifact, f)
+
+        loaded = load_document(artifact_path)
+
+        # Verify column_diagnostics was backfilled
+        assert "column_diagnostics" in loaded, "load_document should backfill column_diagnostics"
+        assert loaded["column_diagnostics"] == [], "Backfilled column_diagnostics should be empty"
+
+    def test_column_diagnostics_json_roundtrip(self, born_digital_pdf: Path, tmp_path: Path):
+        """column_diagnostics survives JSON write/read roundtrip."""
+        from patent_extract import build_document, write_document, load_document
+
+        doc = build_document(born_digital_pdf)
+        diags_original = doc["column_diagnostics"]
+
+        # Write to JSON
+        artifact_path = tmp_path / "roundtrip.json"
+        write_document(doc, artifact_path)
+
+        # Load back
+        loaded = load_document(artifact_path)
+        diags_loaded = loaded["column_diagnostics"]
+
+        # Verify roundtrip
+        assert len(diags_loaded) == len(diags_original), "Diagnostic count should match after roundtrip"
+
+        for orig, loaded_diag in zip(diags_original, diags_loaded):
+            assert loaded_diag["page_index"] == orig["page_index"]
+            assert loaded_diag["column"] == orig["column"]
+            assert loaded_diag["clean"] == orig["clean"]
+            # Float comparison with tolerance
+            assert abs(loaded_diag["frac_clean"] - orig["frac_clean"]) < 1e-9
+            assert abs(loaded_diag["frac_tiny"] - orig["frac_tiny"]) < 1e-9
