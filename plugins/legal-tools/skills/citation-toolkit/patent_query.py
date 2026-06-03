@@ -177,15 +177,19 @@ def parse_cite(cite: str) -> tuple[int, int, int, int]:
 def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: int) -> str:
     """Joined printed text for a citation span (same-column or cross-column).
 
-    Reading order:
+    Reading order (same as before):
     - start_col: lines start_line .. max_line(start_col)
     - each intermediate column c in (start_col+1 .. end_col-1): lines 1 .. max_line(c)
     - end_col: lines 1 .. end_line
 
-    If start_col == end_col, just lines start_line..end_line of that column.
+    Rendering by kind:
+    - text → append text
+    - blank → append "" (preserved vertical gap)
+    - spurious → skip (no output, no blank)
+    - unknown → skip (no output, no blank)
+    - absent slot (not in dict) → CiteError (out of range)
 
-    Blank interior lines (within the column's max range but absent from the artifact)
-    are rendered as empty strings, so output is isomorphic to the printed page.
+    If start_col == end_col, just lines start_line..end_line of that column.
 
     Raises CiteError if:
     - Any referenced column is absent from the artifact
@@ -207,6 +211,23 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
 
     lines_to_join = []
 
+    # Helper to render a line by kind
+    def render_line(col: int, line_num: int, col_lines: dict) -> None:
+        """Append rendered output for a single line based on its kind.
+
+        Appends to lines_to_join (closure).
+        - text → append text
+        - blank → append ""
+        - spurious, unknown → skip (append nothing)
+        """
+        if line_num in col_lines:
+            text, kind = col_lines[line_num]
+            if kind == "text":
+                lines_to_join.append(text)
+            elif kind == "blank":
+                lines_to_join.append("")
+            # spurious and unknown: skip (don't append anything)
+
     # Special case: same column
     if start_col == end_col:
         if start_col not in by_column:
@@ -220,14 +241,9 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
         if end_line > max_col:
             raise CiteError(f"column {start_col}: line {end_line} out of range (max {max_col})")
 
-        # Collect lines, rendering blanks as empty strings
+        # Collect lines by kind
         for ln in range(start_line, end_line + 1):
-            if ln in col_lines:
-                text, kind = col_lines[ln]
-                lines_to_join.append(text)
-            else:
-                # Blank interior line: render as empty string
-                lines_to_join.append("")
+            render_line(start_col, ln, col_lines)
     else:
         # Cross-column: start_col -> max, intermediates -> all, end_col -> 1..end_line
         # Start column: start_line to max_line
@@ -240,13 +256,9 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
         if start_line > max_start_col:
             raise CiteError(f"column {start_col}: line {start_line} out of range (max {max_start_col})")
 
-        # Collect from start_line to max of start_col, rendering blanks as ""
+        # Collect from start_line to max of start_col, rendering by kind
         for ln in range(start_line, max_start_col + 1):
-            if ln in col_lines:
-                text, kind = col_lines[ln]
-                lines_to_join.append(text)
-            else:
-                lines_to_join.append("")
+            render_line(start_col, ln, col_lines)
 
         # Intermediate columns: 1 to max_line
         for col in range(start_col + 1, end_col):
@@ -255,11 +267,7 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
             col_lines = by_column[col]
             max_col_line = max_line_by_column[col]
             for ln in range(1, max_col_line + 1):
-                if ln in col_lines:
-                    text, kind = col_lines[ln]
-                    lines_to_join.append(text)
-                else:
-                    lines_to_join.append("")
+                render_line(col, ln, col_lines)
 
         # End column: 1 to end_line
         if end_col not in by_column:
@@ -271,13 +279,9 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
         if end_line > max_end_col:
             raise CiteError(f"column {end_col}: line {end_line} out of range (max {max_end_col})")
 
-        # Collect from 1 to end_line of end_col, rendering blanks as ""
+        # Collect from 1 to end_line of end_col, rendering by kind
         for ln in range(1, end_line + 1):
-            if ln in col_lines:
-                text, kind = col_lines[ln]
-                lines_to_join.append(text)
-            else:
-                lines_to_join.append("")
+            render_line(end_col, ln, col_lines)
 
     return "\n".join(lines_to_join)
 
