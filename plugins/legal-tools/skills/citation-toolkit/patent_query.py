@@ -174,6 +174,63 @@ def parse_cite(cite: str) -> tuple[int, int, int, int]:
     return start_col, start_line, end_col, end_line
 
 
+def _collect_span_slots(
+    doc: dict, start_col: int, start_line: int, end_col: int, end_line: int
+) -> tuple[dict[tuple[int, int], tuple[str, str]], int]:
+    """Collect all (col, line) -> (text, kind) slots for a span.
+
+    Returns:
+    - slots: {(col, line): (text, kind)} for all slots in the span
+    - width: count of slots in the span (used for ambiguity gate)
+
+    Raises CiteError if any referenced column is absent or any line is out of range.
+    """
+    by_column = {}
+    max_line_by_column = {}
+    for ln in doc["lines"]:
+        col = ln["column"]
+        line_num = ln["line"]
+        if col not in by_column:
+            by_column[col] = {}
+        by_column[col][line_num] = (ln["text"], ln.get("kind", "text"))
+        max_line_by_column[col] = max(max_line_by_column.get(col, 0), line_num)
+
+    slots: dict[tuple[int, int], tuple[str, str]] = {}
+    width = 0
+
+    # Helper to collect slots in reading order
+    def collect_column_slots(col: int, start: int, end: int) -> None:
+        """Collect slots from col, lines start..end (inclusive) in reading order."""
+        nonlocal width
+        if col not in by_column:
+            raise CiteError(f"column {col} not present in artifact")
+        col_lines = by_column[col]
+        max_col = max_line_by_column[col]
+
+        if start > max_col:
+            raise CiteError(f"column {col}: line {start} out of range (max {max_col})")
+        if end > max_col:
+            raise CiteError(f"column {col}: line {end} out of range (max {max_col})")
+
+        for ln in range(start, end + 1):
+            if ln in col_lines:
+                text, kind = col_lines[ln]
+                slots[(col, ln)] = (text, kind)
+                width += 1
+
+    # Same column
+    if start_col == end_col:
+        collect_column_slots(start_col, start_line, end_line)
+    else:
+        # Cross-column
+        collect_column_slots(start_col, start_line, max_line_by_column[start_col])
+        for col in range(start_col + 1, end_col):
+            collect_column_slots(col, 1, max_line_by_column[col])
+        collect_column_slots(end_col, 1, end_line)
+
+    return slots, width
+
+
 def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: int) -> str:
     """Joined printed text for a citation span (same-column or cross-column).
 
@@ -194,10 +251,12 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
     Raises CiteError if:
     - Any referenced column is absent from the artifact
     - start_line > max_line(start_col) or end_line > max_line(end_col) (out of range)
+
+    Raises AmbiguousCiteError if:
+    - A single cite targets a spurious/unknown slot
+    - A small span (< AMBIGUITY_MAX_SPAN) touches a spurious/unknown slot
     """
-    # Build per-column {line: (text, kind)} index and compute max_line for each column.
-    # Per-call rebuild is intentional for current build-once/query-occasionally usage;
-    # if cite-check batches many lookups, memoizing this index is the optimization.
+    # Build per-column index
     by_column = {}
     max_line_by_column = {}
     for ln in doc["lines"]:
@@ -205,81 +264,85 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
         line_num = ln["line"]
         if col not in by_column:
             by_column[col] = {}
-        # Store (text, kind) tuple; kind defaults to "text" for backcompat
         by_column[col][line_num] = (ln["text"], ln.get("kind", "text"))
         max_line_by_column[col] = max(max_line_by_column.get(col, 0), line_num)
 
+    # Collect span slots and check range/column presence (CiteError before gate)
+    slots, width = _collect_span_slots(doc, start_col, start_line, end_col, end_line)
+
+    # GATE 1: Single line spurious/unknown
+    if start_col == end_col and start_line == end_line:
+        _, kind = slots[(start_col, start_line)]
+        if kind in ("spurious", "unknown"):
+            # Find neighbors: above and below
+            col_lines = by_column[start_col]
+            above_line = start_line - 1
+            while above_line > 0:
+                if above_line in col_lines:
+                    above_text, above_kind = col_lines[above_line]
+                    if above_kind == "text":
+                        break
+                above_line -= 1
+            else:
+                above_text = ""
+
+            below_text = physical_lines_from(col_lines, start_line + 1, 1)
+
+            likely_text = "\n".join(
+                filter(None, [above_text, below_text])
+            )
+
+            raise AmbiguousCiteError(
+                cite=(start_col, start_line, end_col, end_line),
+                reason="cited line is a numbering-grid slot, not a printed line",
+                likely_text=likely_text,
+                neighbors=(above_text, below_text) if above_text and below_text else tuple(filter(None, [above_text, below_text])),
+            )
+
+    # GATE 2: Small span touching spurious/unknown
+    if width < AMBIGUITY_MAX_SPAN:
+        # Check if span touches spurious/unknown
+        has_spurious_or_unknown = any(
+            kind in ("spurious", "unknown") for _, kind in slots.values()
+        )
+        if has_spurious_or_unknown:
+            likely_text = physical_lines_from(by_column[start_col], start_line, width)
+            raise AmbiguousCiteError(
+                cite=(start_col, start_line, end_col, end_line),
+                reason=f"span width {width} may not match printed gutter numbering near a grid artifact",
+                likely_text=likely_text,
+            )
+
+    # Render normally (Task 2): walk span and output by kind
     lines_to_join = []
 
-    # Helper to render a line by kind
     def render_line(col: int, line_num: int, col_lines: dict) -> None:
-        """Append rendered output for a single line based on its kind.
-
-        Appends to lines_to_join (closure).
-        - text → append text
-        - blank → append ""
-        - spurious, unknown → skip (append nothing)
-        """
+        """Append rendered output for a single line based on its kind."""
         if line_num in col_lines:
             text, kind = col_lines[line_num]
             if kind == "text":
                 lines_to_join.append(text)
             elif kind == "blank":
                 lines_to_join.append("")
-            # spurious and unknown: skip (don't append anything)
+            # spurious and unknown: skip
 
-    # Special case: same column
+    # Same column
     if start_col == end_col:
-        if start_col not in by_column:
-            raise CiteError(f"column {start_col} not present in artifact")
         col_lines = by_column[start_col]
-        max_col = max_line_by_column[start_col]
-
-        # Check bounds: start_line and end_line must not exceed max_line
-        if start_line > max_col:
-            raise CiteError(f"column {start_col}: line {start_line} out of range (max {max_col})")
-        if end_line > max_col:
-            raise CiteError(f"column {start_col}: line {end_line} out of range (max {max_col})")
-
-        # Collect lines by kind
         for ln in range(start_line, end_line + 1):
             render_line(start_col, ln, col_lines)
     else:
-        # Cross-column: start_col -> max, intermediates -> all, end_col -> 1..end_line
-        # Start column: start_line to max_line
-        if start_col not in by_column:
-            raise CiteError(f"column {start_col} not present in artifact")
+        # Cross-column
         col_lines = by_column[start_col]
-        max_start_col = max_line_by_column[start_col]
-
-        # Check bounds: start_line must not exceed max_line of start_col
-        if start_line > max_start_col:
-            raise CiteError(f"column {start_col}: line {start_line} out of range (max {max_start_col})")
-
-        # Collect from start_line to max of start_col, rendering by kind
-        for ln in range(start_line, max_start_col + 1):
+        for ln in range(start_line, max_line_by_column[start_col] + 1):
             render_line(start_col, ln, col_lines)
 
-        # Intermediate columns: 1 to max_line
         for col in range(start_col + 1, end_col):
-            if col not in by_column:
-                raise CiteError(f"column {col} not present in artifact")
             col_lines = by_column[col]
-            max_col_line = max_line_by_column[col]
-            for ln in range(1, max_col_line + 1):
+            for ln in range(1, max_line_by_column[col] + 1):
                 render_line(col, ln, col_lines)
 
-        # End column: 1 to end_line
-        if end_col not in by_column:
-            raise CiteError(f"column {end_col} not present in artifact")
         col_lines = by_column[end_col]
-        max_end_col = max_line_by_column[end_col]
-
-        # Check bounds: end_line must not exceed max_line of end_col
-        if end_line > max_end_col:
-            raise CiteError(f"column {end_col}: line {end_line} out of range (max {max_end_col})")
-
-        # Collect from 1 to end_line of end_col, rendering by kind
         for ln in range(1, end_line + 1):
             render_line(end_col, ln, col_lines)
 
@@ -304,6 +367,10 @@ def main(argv: list[str] | None = None) -> int:
         doc = json.load(f)
     try:
         sys.stdout.write(lookup_cite(doc, args.cite) + "\n")
+    except AmbiguousCiteError as e:
+        print(f"error (ambiguous): {e.reason}", file=sys.stderr)
+        print(f"likely text:\n{e.likely_text}", file=sys.stderr)
+        return 3
     except CiteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
