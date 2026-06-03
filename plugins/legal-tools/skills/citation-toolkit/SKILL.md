@@ -592,7 +592,9 @@ Output: the joined printed text for the requested span on stdout, with lines sep
 - `text` — a printed line with content (text is non-empty).
 - `blank` — a real printed empty line (e.g., the vertical gap around a centered heading); text is empty.
 - `spurious` — a grid slot the drifting text skipped (no actual line printed there); text is empty. Spurious slots appear when the text leading clusters and the gutter grid drifts below the actual printed lines.
-- `unknown` — a slot on a marker-less page (claims tail with no gutter numerals) where the kind cannot be reliably classified; text may be empty or non-empty. Emitted only by the marker-less extraction path.
+- `unknown` — a slot on a marker-less page (claims tail with no gutter numerals) where the kind cannot be reliably classified; text is empty (a printed line is emitted as `text`, never `unknown`). Emitted only by the marker-less extraction path.
+
+The artifact upholds the invariant `text != "" iff kind == "text"`: only `text` slots carry content; `blank`, `spurious`, and `unknown` slots all have empty text.
 
 **Query contract:** When you request a span `start_col:start_line`–`end_col:end_line`:
 
@@ -604,7 +606,7 @@ Output: the joined printed text for the requested span on stdout, with lines sep
 
 Exit codes: 0 (ok) / 1 (cite error: malformed, out of range, column absent) / 2 (missing artifact) / 3 (ambiguous cite: returned text but grid is unreliable).
 
-**Marker-less best-effort:** Claims tails (single-column pages at document end) often have no gutter numerals. The extraction allocates columns and emits slots with `kind=unknown` for positions where classification is uncertain. Numbering is borrowed-pitch best-effort (assuming the text leading continues at the observed average pitch). Text cites on marker-less pages can resolve, but flagged `kind=unknown` signals lower confidence.
+**Marker-less best-effort:** Claims tails (single-column pages at document end) often have no gutter numerals. The extraction allocates columns and emits printed lines as `kind=text`, filling the gaps between them with `kind=unknown` slots (empty text) where classification is uncertain. Numbering is borrowed-pitch best-effort (assuming the text leading continues at the observed average pitch). Text cites on marker-less pages can resolve, but an `unknown` slot signals lower confidence.
 
 **CLEAN/NOISY diagnostic:** Each column in the artifact is flagged `signal: "CLEAN"` or `signal: "NOISY"` in the `page_fits` metadata. This is a per-column quality flag that warns (to stderr during build) of possible OCR fragmentation (undue word clustering at one y-center). The flag is **diagnostic-only** — it does NOT change the emitted line kinds, numbering, or query behavior. (The original premise that NOISY columns warrant fallback blank-rendering did not reproduce on the production extraction path, which clusters words into one y-center per actual printed row. See the project memory `project_patent_noisy_gate_demoted`.)
 
