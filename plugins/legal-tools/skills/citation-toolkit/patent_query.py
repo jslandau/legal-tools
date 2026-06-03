@@ -222,7 +222,13 @@ def _collect_span_slots(
     if start_col == end_col:
         collect_column_slots(start_col, start_line, end_line)
     else:
-        # Cross-column
+        # Cross-column. Each column's presence is validated inside
+        # collect_column_slots, but its `max_line_by_column[col]` upper bound is
+        # read here first — so guard absent columns (start, intermediate, AND end)
+        # with a CiteError before indexing, rather than leaking a bare KeyError.
+        for col in (start_col, *range(start_col + 1, end_col), end_col):
+            if col not in by_column:
+                raise CiteError(f"column {col} not present in artifact")
         collect_column_slots(start_col, start_line, max_line_by_column[start_col])
         for col in range(start_col + 1, end_col):
             collect_column_slots(col, 1, max_line_by_column[col])
