@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# pattern: Mixed (Functional Core + Imperative Shell)
+# Functional Core: geometry functions (line_at, line_gaps_in_pitch, column_signal_is_clean,
+# slots_spanned, fit_line_model, number_column_slots, gap_fractions_for_clean_diagnostic, etc.)
+# Imperative Shell: reconstruct_page, build_document, load_document (I/O and PDF orchestration).
 """
 patent_extract.py — local US-patent column/line extraction for legal-tools.
 
@@ -666,79 +670,7 @@ def number_column_slots(
     if not text_lines:
         return []
 
-    # Step 1: Assign each text line a gutter number (marker-anchored or borrowed).
-    assigned_lines: list[tuple[int, str]] = []  # (line_number, text)
-
-    if markers:
-        # Marker-bearing: anchor on nearest marker
-        for yc, text in text_lines:
-            nearest = min(markers, key=lambda m: abs(yc - m[1]))
-            n = nearest[0] + round((yc - nearest[1]) / pitch)
-            assigned_lines.append((n, text))
-    else:
-        # Marker-less: use borrowed pitch, then shift so first text line is line 1
-        for yc, text in text_lines:
-            n = round((yc - intercept) / pitch)
-            assigned_lines.append((n, text))
-
-        # Shift so the first assigned line becomes line 1
-        if assigned_lines:
-            min_line = assigned_lines[0][0]
-            assigned_lines = [(n - min_line + 1, text) for n, text in assigned_lines]
-
-    # Step 2: Enforce strict monotonicity (guard against collisions).
-    monotonic_lines: list[tuple[int, str]] = []
-    for n, text in assigned_lines:
-        # If this line number <= last, bump it to last + 1
-        if monotonic_lines and n <= monotonic_lines[-1][0]:
-            n = monotonic_lines[-1][0] + 1
-        monotonic_lines.append((n, text))
-
-    if not monotonic_lines:
-        return []
-
-    # Step 3: Slot filling + kind classification.
-    max_line = monotonic_lines[-1][0]
-    result: list[tuple[int, str, str]] = []
-
-    # Emit a row for each slot 1..max_line
-    i = 0  # index into monotonic_lines
-    for slot in range(1, max_line + 1):
-        if i < len(monotonic_lines) and monotonic_lines[i][0] == slot:
-            # This slot has a text line
-            _, text = monotonic_lines[i]
-            result.append((slot, text, "text"))
-            i += 1
-        else:
-            # This slot is a gap (no text line at this number)
-            # Classify by marker presence and physical gap
-            if not markers:
-                # Marker-less: unknown
-                result.append((slot, "", "unknown"))
-            else:
-                # Marker-bearing: classify by gap (look back to previous text, forward to next)
-                prev_slot = slot - 1
-                next_slot = slot + 1
-
-                # Find the y-centers of the text lines bounding this gap
-                prev_line_idx = i - 1  # Last emitted text line
-                next_line_idx = i      # Next text line to emit
-
-                if prev_line_idx >= 0 and next_line_idx < len(monotonic_lines):
-                    # Both sides: use the gap between them
-                    prev_n, prev_text = monotonic_lines[prev_line_idx]
-                    next_n, next_text = monotonic_lines[next_line_idx]
-
-                    # Recover y-centers from original text_lines (keep parallel to monotonic_lines)
-                    # Actually, we lost the y-centers. Let me reconsider...
-                    # We have monotonic_lines which is (line_number, text).
-                    # We need the y-centers to compute gap ratios.
-                    # Let me refactor: I'll keep a parallel list of y_centers.
-                    pass
-
-    # Actually, I need to refactor to keep y-centers. Let me rewrite.
-
-    # Step 1 (revised): Assign each text line a gutter number AND keep y-centers
+    # Step 1: Assign each text line a gutter number AND keep y-centers
     assigned_lines_with_y: list[tuple[int, str, float]] = []  # (line_number, text, y)
 
     if markers:
@@ -879,11 +811,19 @@ def reconstruct_page(
         text_lines: list[tuple[float, str]] = []
         line_y_map: dict[int, dict] = {}  # line_no -> pdfplumber line dict (for bbox recovery)
 
+        # For marker-less pages, filter header band geometrically (intercept not yet computed).
+        # For marker-bearing pages, use line_at to filter (line < 1 means header).
         for ln in extracted:
             yc = (ln["top"] + ln["bottom"]) / 2.0
-            line_no = line_at(yc, pitch_to_use, intercept)
-            if line_no < 1:
-                continue   # running header / column-number header band
+            if use_borrowed:
+                # Marker-less: filter by geometry (headers sit at top of page)
+                if ln["top"] < HEADER_TOP_MAX:
+                    continue
+            else:
+                # Marker-bearing: filter using the page model (line < 1 is header)
+                line_no = line_at(yc, pitch_to_use, intercept)
+                if line_no < 1:
+                    continue
             text_lines.append((yc, ln["text"]))
             # Store the original line dict for bbox recovery (keyed by temp line number)
             # We'll use len(text_lines)-1 as a temporary index
@@ -905,6 +845,9 @@ def reconstruct_page(
         # Call the pure marker-anchored numbering function
         # For markers, pass only those from this page (they're page-global, but we filter by column below)
         numbered_slots = number_column_slots(text_lines, markers, pitch_to_use, intercept_computed)
+
+        # Build a mapping from text-line y-center to its original index (for accurate bbox recovery)
+        yc_to_idx = {yc: idx for idx, (yc, _) in enumerate(text_lines)}
 
         # Compute CLEAN/NOISY diagnostic for marker-bearing columns only
         if markers:
@@ -938,12 +881,24 @@ def reconstruct_page(
             # Find the corresponding original line dict for bbox (if it's a text line)
             bbox_tuple = None
             if slot_kind == "text":
-                # Find which text line this is (match by slot_text)
+                # For text lines, find the original by matching text (handles most cases)
+                # but key by y-center to avoid duplicate-text collisions.
+                # The y-center for slot slot_no should be near intercept_computed + pitch * slot_no
+                expected_yc = intercept_computed + pitch_to_use * slot_no
+                best_idx = None
+                best_dist = float('inf')
+
                 for idx, (yc, text) in enumerate(text_lines):
                     if text == slot_text:
-                        ln = line_y_map[idx]
-                        bbox_tuple = (ln["x0"], ln["top"], ln["x1"], ln["bottom"])
-                        break
+                        # Among matching text, pick the one closest to expected y
+                        dist = abs(yc - expected_yc)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_idx = idx
+
+                if best_idx is not None:
+                    ln = line_y_map[best_idx]
+                    bbox_tuple = (ln["x0"], ln["top"], ln["x1"], ln["bottom"])
             else:
                 # Non-text kind: use a synthesized bbox at the predicted slot's y
                 # y = intercept_computed + pitch_to_use * slot_no (in page coordinates)

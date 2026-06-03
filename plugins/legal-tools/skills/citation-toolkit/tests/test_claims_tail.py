@@ -187,10 +187,29 @@ class TestClaimsTailDocument:
         assert kinds_present <= {"text", "unknown"}, \
             f"idx29 marker-less page should only have text/unknown kinds, got {kinds_present}"
 
-        # Verify first text line in each column is line 1
-        for col in [33, 34]:
-            col_lines = [ln for ln in idx29_lines if ln["column"] == col and ln["kind"] == "text"]
-            if col_lines:
-                first_line = min(col_lines, key=lambda ln: ln["line"])
-                assert first_line["line"] == 1, \
-                    f"First text line in col {col} should be line 1, got {first_line['line']}"
+        # Verify first text line in each column is line 1 and has correct content (anti-tautology)
+        col33_lines = [ln for ln in idx29_lines if ln["column"] == 33 and ln["kind"] == "text"]
+        if col33_lines:
+            first_line_33 = min(col33_lines, key=lambda ln: ln["line"])
+            assert first_line_33["line"] == 1, \
+                f"First text line in col 33 should be line 1, got {first_line_33['line']}"
+            assert first_line_33["text"].startswith("the shape regardless"), \
+                f"Col 33 line 1 should start with 'the shape regardless', got {first_line_33['text'][:50]!r}"
+            # Verify header strings are NOT present anywhere in col 33
+            forbidden = {"US 8, 13", ",198 B2", "33"}  # Running header, column-number header
+            for ln in col33_lines:
+                for forbidden_text in forbidden:
+                    assert forbidden_text not in ln["text"], \
+                        f"Col 33 line {ln['line']} contains forbidden header text {forbidden_text!r}: {ln['text']!r}"
+
+        col34_lines = [ln for ln in idx29_lines if ln["column"] == 34 and ln["kind"] == "text"]
+        if col34_lines:
+            first_line_34 = min(col34_lines, key=lambda ln: ln["line"])
+            assert first_line_34["line"] == 1, \
+                f"First text line in col 34 should be line 1, got {first_line_34['line']}"
+            # Verify no header strings in col 34 either
+            forbidden = {"US 8, 13", ",198 B2", "34"}
+            for ln in col34_lines:
+                for forbidden_text in forbidden:
+                    assert forbidden_text not in ln["text"], \
+                        f"Col 34 line {ln['line']} contains forbidden header text {forbidden_text!r}: {ln['text']!r}"
