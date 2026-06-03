@@ -167,12 +167,30 @@ class TestClaimsTailDocument:
             if not pf["is_body"]:
                 assert (pf["left_column"], pf["right_column"]) == (0, 0)
 
-    def test_idx29_lines_deferred(self, claims_tail_pdf):
-        """idx29 is body and consumes cols 33/34, but has no line-model (no markers),
-        so its LINE extraction is deferred (issue #1): it contributes zero Line rows,
-        and no other page's columns are perturbed (max populated column is 32)."""
+    def test_idx29_lines_with_borrowed_pitch(self, claims_tail_pdf):
+        """idx29 is body and consumes cols 33/34 with no line-model (no markers),
+        but now uses borrowed pitch from neighboring body pages for numbering.
+        It emits Line rows in cols 33/34 with text/unknown kinds only (no blanks,
+        no spurious). First text line under each header is line 1."""
         doc = build_document(claims_tail_pdf)
         idx29_lines = [ln for ln in doc["lines"] if ln["page_index"] == 29]
-        assert idx29_lines == []
+
+        # Should now have text lines in both columns 33 and 34
+        assert len(idx29_lines) > 0, "idx29 should now emit Line rows"
+
+        # Check that max column reaches 34 (cols 33/34 now populated)
         max_col = max(ln["column"] for ln in doc["lines"])
-        assert max_col == 32  # cols 33/34 allocated but not yet populated
+        assert max_col == 34, f"max column should be 34, got {max_col}"
+
+        # Verify kinds are text/unknown only (no blank, no spurious)
+        kinds_present = {ln["kind"] for ln in idx29_lines}
+        assert kinds_present <= {"text", "unknown"}, \
+            f"idx29 marker-less page should only have text/unknown kinds, got {kinds_present}"
+
+        # Verify first text line in each column is line 1
+        for col in [33, 34]:
+            col_lines = [ln for ln in idx29_lines if ln["column"] == col and ln["kind"] == "text"]
+            if col_lines:
+                first_line = min(col_lines, key=lambda ln: ln["line"])
+                assert first_line["line"] == 1, \
+                    f"First text line in col {col} should be line 1, got {first_line['line']}"

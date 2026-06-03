@@ -820,11 +820,16 @@ def reconstruct_page(
     left_column: int,
     right_column: int,
     page_index: int,
+    borrowed_pitch: float | None = None,
 ) -> tuple[list[Line], list[ColumnDiagnostic]]:
     """Crop LEFT and RIGHT columns around the dead-zoned gutter, line-extract
     each in isolation, drop the header band (predicted line < 1), and tag every
     surviving line with its column and printed line number using marker-anchored
     numbering.
+
+    For marker-bearing pages (pitch and intercept non-None), uses those for numbering.
+    For marker-less pages (gutter from headers, markers=[]), uses borrowed_pitch and
+    computes intercept from the first column text line (anchors to line 1).
 
     Also computes per-column CLEAN/NOISY diagnostic for marker-bearing columns.
     The diagnostic is purely informational and does NOT affect line numbering.
@@ -837,6 +842,20 @@ def reconstruct_page(
     IMPORTANT #3 guard: Clamp crop bounds to [0, page_width] to prevent inverted/empty
     crops if the dead-zone is miscalibrated or the gutter is at a page edge.
     """
+    # Handle marker-less (borrowed-pitch) pages
+    if markers == [] and borrowed_pitch is not None:
+        # Marker-less page: use header-derived gutter and borrowed pitch.
+        # Compute intercept so first text line below header anchors to line 1.
+        # For now, we use a placeholder intercept; it will be adjusted per-column
+        # to anchor the first text line to 1.
+        pitch_to_use = borrowed_pitch
+        # intercept will be computed per-column based on first text line's y
+        use_borrowed = True
+    else:
+        # Normal marker-bearing page
+        pitch_to_use = pitch
+        use_borrowed = False
+
     dz = dead_zone_halfwidth(marker_xs)
     out: list[Line] = []
     diagnostics: list[ColumnDiagnostic] = []
@@ -862,7 +881,7 @@ def reconstruct_page(
 
         for ln in extracted:
             yc = (ln["top"] + ln["bottom"]) / 2.0
-            line_no = line_at(yc, pitch, intercept)
+            line_no = line_at(yc, pitch_to_use, intercept)
             if line_no < 1:
                 continue   # running header / column-number header band
             text_lines.append((yc, ln["text"]))
@@ -873,15 +892,25 @@ def reconstruct_page(
         if not text_lines:
             continue  # No text lines to number
 
+        # For marker-less pages, compute intercept so first text line becomes line 1
+        if use_borrowed:
+            # First text line's y_center is at line 1 by design
+            # Solve: line 1 = round((yc - intercept_computed) / pitch)
+            # For simplicity: intercept_computed = first_yc - pitch/2 (centers line 1 on first text line)
+            first_yc = text_lines[0][0]
+            intercept_computed = first_yc - pitch_to_use / 2.0
+        else:
+            intercept_computed = intercept
+
         # Call the pure marker-anchored numbering function
         # For markers, pass only those from this page (they're page-global, but we filter by column below)
-        numbered_slots = number_column_slots(text_lines, markers, pitch, intercept)
+        numbered_slots = number_column_slots(text_lines, markers, pitch_to_use, intercept_computed)
 
         # Compute CLEAN/NOISY diagnostic for marker-bearing columns only
         if markers:
             # Extract y-centers from text_lines (already sorted in ascending order)
             y_centers = [yc for yc, _ in text_lines]
-            gap_ratios = line_gaps_in_pitch(y_centers, pitch)
+            gap_ratios = line_gaps_in_pitch(y_centers, pitch_to_use)
             clean = column_signal_is_clean(gap_ratios)
             frac_clean, frac_tiny = gap_fractions_for_clean_diagnostic(gap_ratios)
 
@@ -917,8 +946,8 @@ def reconstruct_page(
                         break
             else:
                 # Non-text kind: use a synthesized bbox at the predicted slot's y
-                # y = intercept + pitch * slot_no (in page coordinates)
-                slot_y = intercept + pitch * slot_no
+                # y = intercept_computed + pitch_to_use * slot_no (in page coordinates)
+                slot_y = intercept_computed + pitch_to_use * slot_no
                 # Use the column's crop boundaries as x-coordinates
                 bbox_tuple = (crop_x0, slot_y, crop_x1, slot_y)
 
@@ -1102,9 +1131,9 @@ def build_document(pdf_path: Path) -> PatentDoc:
     so drawing/front-matter pages do not consume column numbers. A body page
     consumes its two column numbers even when its lines cannot yet be extracted
     (e.g. a short claims tail with column headers but no line-model markers —
-    line-number assignment for marker-less pages is deferred to the issue-#1
-    rework). Such a page is recorded with its correct columns but contributes
-    no Line rows.
+    line-number assignment for marker-less pages uses a borrowed pitch computed
+    as the median of body pages with fits). Such a page is recorded with its
+    correct columns and now contributes Line rows.
 
     Also collects per-column CLEAN/NOISY diagnostics for all marker-bearing columns.
     """
@@ -1116,6 +1145,37 @@ def build_document(pdf_path: Path) -> PatentDoc:
     counts: list[int] = []
     body_pages_seen = 0   # k: this many body pages processed so far
 
+    # First pass: collect pitches from body pages with fits to compute median fallback pitch
+    body_page_fits: list[tuple[float, float]] = []  # (pitch, intercept) for each body page with fit
+
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        # First pass to collect page metadata
+        for idx, page in enumerate(pdf.pages):
+            words = [to_word(d) for d in page.extract_words()]
+            markers = select_markers(words, page.width)
+            fit = fit_line_model(markers)
+            gutter, gutter_disagreement = resolve_gutter(words, page.width)
+
+            # Provisional column numbers for THIS page if it turns out to be body.
+            left_col = 2 * len(body_page_fits) + 1
+            right_col = 2 * len(body_page_fits) + 2
+
+            page_fit = classify_page(
+                words, page.width, markers, fit, gutter,
+                page_index=idx, left_column=left_col, right_column=right_col,
+                gutter_disagreement=gutter_disagreement,
+            )
+
+            if page_fit["is_body"] and fit is not None:
+                body_page_fits.append(fit)
+
+    # Compute median pitch from body pages with fits
+    borrowed_pitch: float | None = None
+    if body_page_fits:
+        pitches = [pitch for pitch, _ in body_page_fits]
+        borrowed_pitch = statistics.median(pitches)
+
+    # Second pass: build lines
     with pdfplumber.open(str(pdf_path)) as pdf:
         for idx, page in enumerate(pdf.pages):
             words = [to_word(d) for d in page.extract_words()]
@@ -1144,11 +1204,23 @@ def build_document(pdf_path: Path) -> PatentDoc:
                     page_lines, page_diags = reconstruct_page(
                         page, page.width, page.height, gutter, marker_xs, markers,
                         pitch, intercept, left_col, right_col, idx,
+                        borrowed_pitch=None,  # This page has its own fit
                     )
                     lines.extend(page_lines)
                     column_diagnostics.extend(page_diags)
-                # else: body page with no line-model (marker-less short claims
-                # tail). Columns are consumed; line extraction deferred (issue #1).
+                elif gutter is not None and borrowed_pitch is not None:
+                    # Body page with no fit but has gutter (marker-less): use borrowed pitch
+                    marker_xs: list[float] = []  # No marker xs for marker-less page
+                    page_lines, page_diags = reconstruct_page(
+                        page, page.width, page.height, gutter, marker_xs, [],
+                        pitch=0.0,  # pitch unused for marker-less; borrowed_pitch passed separately
+                        intercept=0.0,  # intercept unused; will be computed per-column
+                        left_column=left_col, right_column=right_col, page_index=idx,
+                        borrowed_pitch=borrowed_pitch,
+                    )
+                    lines.extend(page_lines)
+                    column_diagnostics.extend(page_diags)
+                # else: body page with no gutter (shouldn't happen given is_body vote rules)
                 body_pages_seen += 1
             else:
                 # Non-body page: keep its diagnostic but zero its columns so it
