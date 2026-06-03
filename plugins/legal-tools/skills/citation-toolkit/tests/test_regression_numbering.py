@@ -38,7 +38,8 @@ def all_fixtures() -> dict[str, dict]:
     fixtures_dir = Path(__file__).resolve().parent.parent / "test_fixtures"
     fixtures = {}
 
-    # US9154231 — born-digital, max column 15 (expected 16 in task, but actual is 15)
+    # US9154231 — born-digital; highest line-bearing column is 15 (the claims
+    # tail page is allocated cols 15/16 but col 16 is empty — see test_max_column_us9)
     pdf_9154231 = fixtures_dir / "US9154231.pdf"
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -349,15 +350,21 @@ class TestRegressionNumberingInvariants:
         )
 
     def test_max_column_us9(self, all_fixtures: dict[str, dict]):
-        """AC11.1: Column counter reaches expected max for US9154231.
+        """AC11.1: highest line-bearing column for US9154231 is 15.
 
-        Note: The actual max is 15 (not 16 as initially documented in the task).
-        This assertion captures the actual observed behavior.
+        The patent's claims tail occupies a single-column page (page index 14)
+        that the page classifier allocates as columns 15/16, but the claims text
+        ends in column 15 — column 16 is allocated-but-empty and emits no lines
+        (documented since Phase 2 in test_document.py). So the plan/memory figure
+        of "16" is the allocated column count; the highest column that actually
+        carries text — and thus the highest citable max here — is 15. A claims
+        spill into col 16 would break this assertion, which is the regression we
+        want to catch.
         """
         doc = all_fixtures["US9154231"]
         actual_max = max(line["column"] for line in doc["lines"])
 
-        # Expected is 15 (observed from build)
+        # Highest column that carries emitted lines (col 16 is allocated-but-empty).
         expected_max = 15
         assert actual_max == expected_max, (
             f"US9154231 max column: expected {expected_max}, got {actual_max}"
