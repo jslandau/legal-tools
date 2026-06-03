@@ -559,7 +559,7 @@ The extraction script reads a patent PDF with an embedded text layer and produce
 python3 plugins/legal-tools/skills/citation-toolkit/patent_extract.py build --input US9154231.pdf --out us9.json
 ```
 
-Output: a `PatentDoc` JSON artifact with `lines` (each tagged with `column`, `line`, `text`, and `page_index`) and diagnostic `page_fits` (including per-page confidence signals like `max_marker_residual`). For high-confidence pages, this residual is `0` (perfect line alignment); pages flagged as non-body content have a residual of `−1`.
+Output: a `PatentDoc` JSON artifact with `lines` (each tagged with `column`, `line`, `text`, `kind`, and `page_index`) and diagnostic `page_fits` (including per-page confidence signals like `max_marker_residual` and `signal` status). For high-confidence pages, `max_marker_residual` is `0` (perfect line alignment); pages flagged as non-body content have a residual of `−1`.
 
 **Dependency:** `pip install pdfplumber`. On PEP-668 systems (recent Linux distros), use a venv:
 ```bash
@@ -581,15 +581,32 @@ python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact u
 # Cross-column span (column 4 line 65 through column 5 line 3)
 python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 4:65-5:3
 
-# Span with interior blank line (rendered as blank in output)
-python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 3:12-14
+# Span with true blank line (rendered as blank in output)
+python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 3:49-51
 ```
 
 Output: the joined printed text for the requested span on stdout, with lines separated by newline. Cross-column citations read in document order: start column from start_line to its max_line, each intermediate column 1 to its max_line, then end column from 1 to end_line.
 
-**Blank line handling:** US patents number every physical line slot, including blank spacing around centered headings. Interior line numbers that are absent from the extraction (no text-bearing line at that slot) are rendered as empty strings in the output, preserving the isomorphic structure to the printed page. Example: if column 3 line 13 is blank, `--cite 3:12-14` returns three lines joined by newlines with the middle one empty: `"line12\n\nline14"` (note the blank middle segment yields a blank line in the output).
+**Line numbering truth model:** US patents number every physical line slot by a gutter grid — the printed margin numbers (multiples of 5) are authoritative anchors, and the grid pitch is the truth source. The text leading drifts from the grid over the course of a page (~0.33pt per line), so line numbers are assigned per-grid-slot, not per-text-row. Each slot in the extracted artifact carries a `kind` field classifying it:
 
-**Errors:** Out-of-range citations (start_line > max_line of start_col, end_line > max_line of end_col, or referenced column absent) raise CiteError to stderr with exit code 1. Malformed citations also error.
+- `text` — a printed line with content (text is non-empty).
+- `blank` — a real printed empty line (e.g., the vertical gap around a centered heading); text is empty.
+- `spurious` — a grid slot the drifting text skipped (no actual line printed there); text is empty. Spurious slots appear when the text leading clusters and the gutter grid drifts below the actual printed lines.
+- `unknown` — a slot on a marker-less page (claims tail with no gutter numerals) where the kind cannot be reliably classified; text may be empty or non-empty. Emitted only by the marker-less extraction path.
+
+**Query contract:** When you request a span `start_col:start_line`–`end_col:end_line`:
+
+- `text` slots are rendered at full content.
+- True `blank` slots (interior to the span, not at span edges) are rendered as empty lines, preserving the printed vertical structure.
+- `spurious` slots are skipped silently — bracketing `text` is contiguous and reads continuously.
+- **Ambiguity signal:** A span shorter than 5 lines (the `AMBIGUITY_MAX_SPAN` threshold), or a single cite (`cite_width=1`), that **touches** a `spurious` or `unknown` slot raises an `AmbiguousCiteError` (exit code 3). This signals that the grid is unreliable at that scale; the error still returns the likely-intended text (the consecutive physical lines from the start; for a single cite, both neighbors). The human can disambiguate by inspecting the PDF.
+- Spans of 5+ lines render normally without raising an ambiguity signal — at large scales, humans anchor visually, not by counting, so the signal is not useful.
+
+Exit codes: 0 (ok) / 1 (cite error: malformed, out of range, column absent) / 2 (missing artifact) / 3 (ambiguous cite: returned text but grid is unreliable).
+
+**Marker-less best-effort:** Claims tails (single-column pages at document end) often have no gutter numerals. The extraction allocates columns and emits slots with `kind=unknown` for positions where classification is uncertain. Numbering is borrowed-pitch best-effort (assuming the text leading continues at the observed average pitch). Text cites on marker-less pages can resolve, but flagged `kind=unknown` signals lower confidence.
+
+**CLEAN/NOISY diagnostic:** Each column in the artifact is flagged `signal: "CLEAN"` or `signal: "NOISY"` in the `page_fits` metadata. This is a per-column quality flag that warns (to stderr during build) of possible OCR fragmentation (undue word clustering at one y-center). The flag is **diagnostic-only** — it does NOT change the emitted line kinds, numbering, or query behavior. (The original premise that NOISY columns warrant fallback blank-rendering did not reproduce on the production extraction path, which clusters words into one y-center per actual printed row. See the project memory `project_patent_noisy_gate_demoted`.)
 
 The query script is stdlib-only — no dependencies beyond Python 3.
 
@@ -601,7 +618,7 @@ The build-once/query-many split is intentional. The geometric complexity (gutter
 
 - **Local-only:** The PDF and extracted text never leave the machine. Both scripts run entirely offline.
 - **Confidence signals:** Each page's diagnostic includes `is_body` (boolean — is this a numbered column:line page whose text is extracted and which consumes column numbers), `flagged` (boolean — does the page warrant a human look) and `flag_reason` (string), plus the per-page `max_marker_residual` confidence metric. `is_body` and `flagged` are usually opposites, but a body page can be both (e.g. a gutter cross-check disagreement is extracted *and* surfaced for review). Use these to assess extraction confidence before relying on a document's citations.
-- **Page classification (voting rule):** A page is body text if it has a clean gutter line-model fit, OR both column-number headers, OR at least two of {≥2 gutter markers, ≥1 column header, ≥100 words}. This admits single-column **claims tails** — including very short ones with zero multiple-of-5 gutter line-numbers, where the gutter is recovered from the column-header midpoint. (Line-number *assignment* for such marker-less pages is a known follow-up; the page is recognized and its columns allocated, but its individual lines may not yet be extracted.)
+- **Page classification (voting rule):** A page is body text if it has a clean gutter line-model fit, OR both column-number headers, OR at least two of {≥2 gutter markers, ≥1 column header, ≥100 words}. This admits single-column **claims tails** — including very short ones with zero multiple-of-5 gutter line-numbers, where the gutter is recovered from the column-header midpoint. Marker-less columns emit `unknown` slots rather than guessing blanks.
 - **Citation recognition:** Patent-cite recognition rules (determining when a string like `4:32-38` appears in text and signifying a column:line reference) are out of scope here. The cite-check skill will integrate those rules and consume these scripts' outputs.
 
 ---
