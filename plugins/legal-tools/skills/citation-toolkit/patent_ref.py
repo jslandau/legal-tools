@@ -235,7 +235,6 @@ def parse_patent_ref(raw: str) -> PatentRef:
     """
     # Normalize
     normalized = _strip_noise(raw)
-    has_slash = "/" in raw
 
     # Try provisional: 60/NNNNNN, 61/NNNNNN, 62/NNNNNN
     if re.match(r"^(60|61|62)/\d{6}$", normalized):
@@ -357,7 +356,12 @@ def process(entries: list[dict]) -> list[dict]:
         List of dicts with keys "id", "kind", "canonical_number", "display", "fetchable", "reason".
     """
     results: list[dict] = []
-    for entry in entries:
+    for i, entry in enumerate(entries):
+        # Defense-in-depth: validate that each entry is a dict before calling .get()
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"array element at index {i} is not a dict (got {type(entry).__name__})"
+            )
         entry_id = entry.get("id")
         raw = entry.get("raw", "")
         patent_ref = parse_patent_ref(raw)
@@ -401,7 +405,12 @@ def main(argv: list[str]) -> int:
         sys.stderr.write("ERROR: input JSON must be an array of request objects.\n")
         return 2
 
-    results = process(entries)
+    try:
+        results = process(entries)
+    except ValueError as e:
+        sys.stderr.write(f"ERROR: invalid array element: {e}\n")
+        return 2
+
     json.dump(results, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0

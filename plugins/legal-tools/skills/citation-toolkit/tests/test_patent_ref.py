@@ -646,6 +646,57 @@ class TestBatchProcessing:
         assert results[2]["kind"] == "unsupported"
 
 
+class TestBatchProcessingErrorHandling:
+    """Tests for error handling in process() and main()."""
+
+    def test_process_non_dict_element_raises_error(self):
+        """process() should raise ValueError if an array element is not a dict."""
+        from patent_ref import process
+        import pytest
+
+        entries = [
+            {"id": "p1", "raw": "8453642"},
+            "not a dict",  # Non-dict element
+        ]
+
+        with pytest.raises(ValueError, match="index 1.*not a dict"):
+            process(entries)
+
+    def test_process_non_dict_element_names_index(self):
+        """Error message should clearly identify the bad index."""
+        from patent_ref import process
+        import pytest
+
+        entries = [
+            {"id": "p1", "raw": "8453642"},
+            {"id": "p2", "raw": "D645062"},
+            ["list", "not", "dict"],  # Non-dict at index 2
+        ]
+
+        with pytest.raises(ValueError, match="index 2"):
+            process(entries)
+
+    def test_main_non_dict_element_exits_2(self, capsys):
+        """main() should exit 2 when array contains non-dict element."""
+        from patent_ref import main
+        import sys
+        import io
+        import json as json_module
+
+        input_data = json_module.dumps([{"id": "p1", "raw": "8453642"}, "not a dict"])
+        old_stdin = sys.stdin
+        sys.stdin = io.StringIO(input_data)
+
+        result = main([])
+
+        sys.stdin = old_stdin
+        captured = capsys.readouterr()
+
+        assert result == 2
+        assert "ERROR" in captured.err
+        assert "invalid array element" in captured.err
+
+
 class TestMainCLI:
     """Tests for the main() CLI function."""
 
