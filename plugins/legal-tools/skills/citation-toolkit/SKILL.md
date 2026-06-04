@@ -131,6 +131,14 @@ Identify citations of these types. The consuming skill decides what to do with e
 - Restatements: `Restatement ([ed.]) of [Subject] § [section] ([year])`
 - Blog posts, reports, web sources: author/org, title, date, URL if present
 
+### Patents
+
+- Utility grant: `U.S. Patent No. 8,453,642` (7–10 digits; kind codes `B1`/`B2` are noise, stripped)
+- Design / plant / reissue grant: `D645,062` / `PP12,345` / `RE38,161` (letter prefix kept — it identifies the document)
+- Application publication: `U.S. Patent Application Pub. No. 2009/0151718 A1` (11-digit `YYYYNNNNNNN`; cited to paragraph `[0042]`, not column:line)
+- Provisional: `60/123,456` → not publicly retrievable; flag, do not fetch
+- Parsed by `patent_ref.py` into a `PatentRef` (see Structured Component Schemas). Patents are a **gap category** — eyecite does not emit them; they are caught in the Pass-2 manual walk.
+
 ---
 
 ## Short Forms
@@ -229,6 +237,17 @@ start_page: [number] or null
 pincite: [page] or null
 year: [number] or null
 url: [if present] or null
+```
+
+**Patents:**
+```
+citation_type: patent
+full_citation: [full string as it appears]
+kind: [grant | apppub | provisional | unsupported]
+canonical_number: [grant-utility digits "8453642"; design/plant/reissue letter-prefixed "D645062"; apppub 11-digit "20090151718"; unsupported best-effort digits]
+display: [e.g., U.S. Patent No. 8,453,642]
+fetchable: [true for grant|apppub; false for provisional|unsupported]
+reason: [why non-fetchable/unclassifiable] or null
 ```
 
 **Constitutional Provisions:**
