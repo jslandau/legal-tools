@@ -164,6 +164,37 @@ def physical_lines_from(
     return "\n".join(result)
 
 
+def _physical_lines_in_reading_order(
+    by_column: dict[int, dict[int, tuple[str, str]]],
+    max_line_by_column: dict[int, int],
+    start_col: int,
+    start_line: int,
+    count: int,
+) -> str:
+    """`count` consecutive text-kind lines from (start_col, start_line) onward.
+
+    Like physical_lines_from, but continues across column boundaries in document
+    reading order (start_col from start_line to its max, then start_col+1 from
+    line 1, and so on). Used to build the ambiguity `likely_text` so a cross-column
+    cite's hint continues into the next column instead of stopping at the gutter.
+    Skips blank/spurious/unknown slots; returns fewer lines if the document ends.
+    """
+    result: list[str] = []
+    col = start_col
+    line = start_line
+    while len(result) < count and col in by_column:
+        col_lines = by_column[col]
+        while len(result) < count and line <= max_line_by_column[col]:
+            if line in col_lines:
+                text, kind = col_lines[line]
+                if kind == "text":
+                    result.append(text)
+            line += 1
+        col += 1
+        line = 1
+    return "\n".join(result)
+
+
 def parse_cite(cite: str) -> tuple[int, int, int, int]:
     """Parse citation into (start_col, start_line, end_col, end_line).
 
@@ -324,7 +355,15 @@ def lookup(doc: dict, start_col: int, start_line: int, end_col: int, end_line: i
             kind in ("spurious", "unknown") for _, kind in slots.values()
         )
         if has_spurious_or_unknown:
-            likely_text = physical_lines_from(by_column[start_col], start_line, width)
+            # Likely-intended text = the cited-width count of consecutive physical
+            # (text-kind) lines starting at the cite. These continue PAST the cited
+            # span end when it lands on a non-text slot (e.g. cite 12-13 where 13 is
+            # spurious yields lines 12 and 14), and ACROSS the column boundary for a
+            # cross-column cite — so gather from the whole-document reading order,
+            # not just by_column[start_col].
+            likely_text = _physical_lines_in_reading_order(
+                by_column, max_line_by_column, start_col, start_line, width
+            )
             raise AmbiguousCiteError(
                 cite=(start_col, start_line, end_col, end_line),
                 reason=f"span width {width} may not match printed gutter numbering near a grid artifact",

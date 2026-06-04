@@ -824,6 +824,13 @@ def reconstruct_page(
                 line_no = line_at(yc, pitch_to_use, intercept)
                 if line_no < 1:
                     continue
+            # Guarantee the artifact invariant `text != "" iff kind == "text"` at the
+            # boundary: a row reaches the numbering core as a `text` slot, so it must
+            # carry real text. extract_text_lines() doesn't emit char-less rows in
+            # practice, but skip any empty/whitespace-only line so the invariant is
+            # structurally enforced rather than merely true-on-our-fixtures.
+            if not ln["text"].strip():
+                continue
             text_lines.append((yc, ln["text"]))
             # Store the original line dict for bbox recovery (keyed by temp line number)
             # We'll use len(text_lines)-1 as a temporary index

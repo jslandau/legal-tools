@@ -382,3 +382,88 @@ class TestIntegrationUS9154231:
         lines = text.split("\n")
         # Should have multiple lines (some may be blank, none should raise)
         assert len(lines) > 0, f"Expected non-empty result, got: {text!r}"
+
+
+@pytest.fixture
+def artifact_cross_column_spurious() -> dict:
+    """Hand-built two-column artifact for cross-column ambiguity tests.
+
+    Column 1: line 4=text, line 5=spurious (the grid artifact).
+    Column 2: lines 1,2 = text.
+    A cross-column cite 1:4-2:1 has width 3 (col1 lines 4,5 + col2 line 1) and
+    touches the spurious slot 1:5 — so it must raise, and the likely-intended
+    text must continue ACROSS the gutter into column 2.
+    """
+    return {
+        "patent_id": "test",
+        "source_path": "test.pdf",
+        "source_sha256": "0000",
+        "has_text_layer": True,
+        "lines": [
+            {"column": 1, "line": 4, "text": "<1.4>", "kind": "text", "bbox": (0, 0, 1, 1), "page_index": 0},
+            {"column": 1, "line": 5, "text": "", "kind": "spurious", "bbox": (0, 0, 1, 1), "page_index": 0},
+            {"column": 2, "line": 1, "text": "<2.1>", "kind": "text", "bbox": (0, 0, 1, 1), "page_index": 0},
+            {"column": 2, "line": 2, "text": "<2.2>", "kind": "text", "bbox": (0, 0, 1, 1), "page_index": 0},
+        ],
+        "page_fits": [],
+        "column_diagnostics": [],
+    }
+
+
+class TestCrossColumnAmbiguity:
+    """A small cross-column span touching a spurious slot raises AND its
+    likely_text continues across the column boundary (final-review gap)."""
+
+    def test_cross_column_small_span_touching_spurious_raises(
+        self, artifact_cross_column_spurious: dict
+    ):
+        from patent_query import AmbiguousCiteError, lookup
+
+        # 1:4-2:1 spans col1 lines 4,5 then col2 line 1 (width 3 < 5), touches spurious 1:5.
+        with pytest.raises(AmbiguousCiteError) as exc:
+            lookup(artifact_cross_column_spurious, 1, 4, 2, 1)
+        # The hint must continue past the gutter — start col's real line PLUS col 2's.
+        # Bug being guarded against: hint drawn only from start column → "<1.4>".
+        assert exc.value.likely_text == "<1.4>\n<2.1>\n<2.2>", (
+            f"cross-column likely_text should span into column 2, got "
+            f"{exc.value.likely_text!r}"
+        )
+
+    def test_same_column_hint_still_scans_past_span_end(
+        self, artifact_with_spurious: dict
+    ):
+        """Regression guard for the same-column hint: cite 12-13 (13 spurious)
+        must gather two physical lines by continuing PAST the span end to 14."""
+        from patent_query import AmbiguousCiteError, lookup
+
+        # artifact_with_spurious: col1 10..16, 13 spurious. Cite 12-13 (width 2).
+        with pytest.raises(AmbiguousCiteError) as exc:
+            lookup(artifact_with_spurious, 1, 12, 1, 13)
+        assert exc.value.likely_text == "<12>\n<14>", (
+            f"same-column hint should be lines 12 and 14 (skipping spurious 13), "
+            f"got {exc.value.likely_text!r}"
+        )
+
+
+class TestExitCode2MissingArtifact:
+    """AC9.4 exit code 2: main() returns 2 when the artifact file is absent."""
+
+    def test_missing_artifact_exit_2(self, tmp_path: Path):
+        import sys
+        from io import StringIO
+
+        from patent_query import main
+
+        missing = tmp_path / "does_not_exist.json"
+        old_stderr = sys.stderr
+        sys.stderr = StringIO()
+        try:
+            exit_code = main(["--artifact", str(missing), "--cite", "1:1"])
+        finally:
+            stderr_output = sys.stderr.getvalue()
+            sys.stderr = old_stderr
+
+        assert exit_code == 2, f"Expected exit code 2 for missing artifact, got {exit_code}"
+        assert "no such artifact" in stderr_output.lower() or "not" in stderr_output.lower(), (
+            f"stderr should explain the missing artifact, got: {stderr_output!r}"
+        )
