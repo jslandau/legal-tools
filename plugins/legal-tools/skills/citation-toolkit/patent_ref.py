@@ -121,8 +121,11 @@ def _strip_noise(raw: str) -> str:
     """
     s = raw.strip().upper()
 
-    # Noise tokens to strip from the beginning (in order of specificity)
+    # Noise tokens to strip from the beginning (in order of specificity — longest first)
     noise_tokens = [
+        "U.S. PLANT PATENT NO.",
+        "U.S. REISSUE PATENT NO.",
+        "U.S. PROVISIONAL APPLICATION NO.",
         "U.S. PATENT NO.",
         "U.S. PATENT APPLICATION PUBLICATION NO.",
         "U.S. PATENT APPLICATION PUB. NO.",
@@ -131,6 +134,9 @@ def _strip_noise(raw: str) -> str:
         "U.S. PATENT APPLICATION",
         "U.S. PATENT",
         "U.S. NO.",
+        "U.S. PLANT PATENT",
+        "U.S. REISSUE PATENT",
+        "U.S. PROVISIONAL APPLICATION",
         "UNITED STATES PATENT NO.",
         "UNITED STATES PATENT",
         "U.S.",
@@ -139,6 +145,11 @@ def _strip_noise(raw: str) -> str:
         "PATENT APPLICATION PUBLICATION",
         "PATENT APPLICATION PUB.",
         "PATENT APPLICATION",
+        "PLANT PATENT NO.",
+        "PLANT PATENT",
+        "REISSUE PATENT NO.",
+        "REISSUE PATENT",
+        "PROVISIONAL APPLICATION",
         "PATENT NO.",
         "PATENT",
         "APPLICATION PUBLICATION",
