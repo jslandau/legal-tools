@@ -1,7 +1,12 @@
 """Tests for patent_verify: normalization + blob/index building."""
 import pytest
 
-from patent_verify import normalize_line, rejoin_hyphen_splits, build_blob_and_index
+from patent_verify import (
+    normalize_line,
+    rejoin_hyphen_splits,
+    build_blob_and_index,
+    resolve_offset,
+)
 
 
 class TestNormalizeLine:
@@ -279,3 +284,83 @@ class TestBuildBlobAndIndex:
         blob, index = build_blob_and_index(lines)
         assert blob == ""
         assert index == []
+
+
+class TestResolveOffset:
+    """Tests for AC3.1, AC3.2, AC3.5: resolve single offset to coordinate."""
+
+    def test_ac3_1_offset_at_line_start(self):
+        """AC3.1: Offset equal to an entry's char_offset resolves to that entry's (column, line)."""
+        # Build a blob with known index
+        lines = [
+            {"column": 1, "line": 1, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "world", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Index: [(0, 1, 1), (6, 1, 2)]
+        # Offset 0 should resolve to (1, 1)
+        result = resolve_offset(index, 0)
+        assert result == (1, 1)
+
+    def test_ac3_1_offset_at_second_line_start(self):
+        """AC3.1: Offset at the second line's start resolves to that line."""
+        lines = [
+            {"column": 1, "line": 1, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "world", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Index: [(0, 1, 1), (6, 1, 2)]
+        # Offset 6 should resolve to (1, 2)
+        result = resolve_offset(index, 6)
+        assert result == (1, 2)
+
+    def test_ac3_2_mid_line_offset_resolves_to_greater_equal(self):
+        """AC3.2: Offset strictly between two entries resolves to the lower (greatest-≤) entry."""
+        lines = [
+            {"column": 1, "line": 1, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "world", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Index: [(0, 1, 1), (6, 1, 2)]
+        # Blob: "hello world"
+        # Offset 3 is within "hello", should resolve to (1, 1)
+        result = resolve_offset(index, 3)
+        assert result == (1, 1)
+
+    def test_ac3_2_offset_within_second_line(self):
+        """AC3.2: Offset within the second line resolves to the second line."""
+        lines = [
+            {"column": 1, "line": 1, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "world", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Index: [(0, 1, 1), (6, 1, 2)]
+        # Offset 8 is within "world", should resolve to (1, 2)
+        result = resolve_offset(index, 8)
+        assert result == (1, 2)
+
+    def test_ac3_5_index_offsets_strictly_ascending(self):
+        """AC3.5: Index offsets are strictly monotonic (ascending, unambiguous bucketing)."""
+        lines = [
+            {"column": 1, "line": 1, "text": "one", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "two", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 3, "text": "three", "bbox": (0, 40, 10, 50), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Verify strictly ascending
+        assert all(index[i][0] < index[i + 1][0] for i in range(len(index) - 1))
+
+    def test_empty_index_raises_value_error(self):
+        """Resolving an offset against an empty index raises ValueError."""
+        with pytest.raises(ValueError):
+            resolve_offset([], 5)
+
+    def test_offset_before_first_entry_raises_value_error(self):
+        """An offset that precedes the first entry (pos < 0) raises ValueError."""
+        lines = [
+            {"column": 1, "line": 1, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Index starts at offset 0; any negative offset should fail
+        with pytest.raises(ValueError):
+            resolve_offset(index, -1)

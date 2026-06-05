@@ -223,3 +223,36 @@ def build_blob_and_index(lines: list[Line]) -> tuple[str, list[tuple[int, int, i
         char_offset += len(text) + 1
 
     return blob, index
+
+
+def resolve_offset(index: list[tuple[int, int, int]], offset: int) -> tuple[int, int]:
+    """Resolve a blob character offset to its (column, line) coordinate.
+
+    AC3.1, AC3.2, AC3.5: Map a blob character offset to the (column, line) coordinate
+    of the index entry with the greatest char_offset <= offset.
+
+    Uses binary search (bisect_right) to efficiently locate the index entry.
+    The entry's column and line fields are returned.
+
+    Args:
+        index: List of (char_offset, column, line) tuples, strictly ascending by char_offset.
+        offset: The blob character offset to resolve.
+
+    Returns:
+        (column, line) from the index entry with the greatest char_offset <= offset.
+
+    Raises:
+        ValueError: If index is empty or offset precedes the first index entry (pos < 0).
+    """
+    if not index:
+        raise ValueError("index is empty")
+
+    # Build the offsets list and use bisect to find the greatest offset <= target
+    offsets = [e[0] for e in index]
+    pos = bisect.bisect_right(offsets, offset) - 1
+
+    if pos < 0:
+        raise ValueError(f"offset {offset} precedes the first index entry")
+
+    # Return (column, line) from the entry at pos
+    return (index[pos][1], index[pos][2])
