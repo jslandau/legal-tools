@@ -48,7 +48,9 @@ def normalize_line(text: str) -> str:
     return _WS.sub(" ", text).strip()
 
 
-def rejoin_hyphen_splits(lines: list[str]) -> list[str]:
+def rejoin_hyphen_splits(
+    lines: list[str],
+) -> list[str]:
     """Rejoin line-break hyphen splits intelligently.
 
     AC1.2, AC1.3: When a line ends with `-` and the next line starts with a
@@ -118,6 +120,77 @@ def rejoin_hyphen_splits(lines: list[str]) -> list[str]:
     return result
 
 
+def rejoin_hyphen_splits_with_metadata(
+    texts: list[str], metadata: list[tuple[int, int]]
+) -> list[tuple[str, int, int]]:
+    """Rejoin line-break hyphen splits while tracking source coordinates.
+
+    This is the shared core for both rejoin_hyphen_splits and build_blob_and_index.
+    It processes the same rejoin logic as rejoin_hyphen_splits, but emits
+    (text, column, line) tuples so the caller knows which source line each
+    output text came from.
+
+    CRITICAL FIX: When a remainder is emitted (a line whose first word was
+    pulled into the prior line), it is tagged with its own source line's
+    metadata, NOT the prior line's metadata.
+
+    Args:
+        texts: List of normalized line texts in reading order.
+        metadata: List of (column, line) tuples, one per text, in reading order.
+
+    Returns:
+        List of (text, column, line) tuples with hyphens rejoined.
+        One entry per original text (minus dropped empty remainders).
+    """
+    if not texts:
+        return []
+
+    result = []
+    i = 0
+    while i < len(texts):
+        current_text = texts[i]
+        current_col, current_line = metadata[i]
+        i += 1
+
+        # Process current line, potentially merging with following lines
+        while i < len(texts) and current_text.endswith("-"):
+            next_text = texts[i]
+            next_col, next_line = metadata[i]
+
+            # Check if next line starts with lowercase ASCII letter
+            if next_text and next_text[0].islower() and next_text[0].isascii():
+                # This is a split: extract the first word from next line
+                space_index = next_text.find(" ")
+                if space_index == -1:
+                    # Entire next line is one word; no remainder
+                    moved_word = next_text
+                    remainder = ""
+                else:
+                    # Split at first space
+                    moved_word = next_text[:space_index]
+                    remainder = next_text[space_index + 1:]
+
+                # Rejoin: drop the trailing hyphen, append the moved word
+                current_text = current_text[:-1] + moved_word
+                i += 1
+
+                # If there's a remainder, emit current and continue with remainder
+                if remainder:
+                    result.append((current_text, current_col, current_line))
+                    # CRITICAL FIX: Remainder is tagged with the line it came from
+                    current_text = remainder
+                    current_col, current_line = next_col, next_line
+                # If no remainder, keep extending current with next-next line
+            else:
+                # No split condition met: stop processing this line
+                break
+
+        # Emit final form of current
+        result.append((current_text, current_col, current_line))
+
+    return result
+
+
 def build_blob_and_index(lines: list[Line]) -> tuple[str, list[tuple[int, int, int]]]:
     """Build a clean blob and offset index from artifact lines.
 
@@ -129,7 +202,7 @@ def build_blob_and_index(lines: list[Line]) -> tuple[str, list[tuple[int, int, i
     Steps:
     1. Filter to kind == "text" lines.
     2. Normalize each line's text (collapse whitespace, strip ends).
-    3. Rejoin line-break hyphens while tracking index entries.
+    3. Rejoin line-break hyphens using shared helper, tracking source coordinates.
     4. Concatenate into a single blob using space as separator.
     5. Return blob and index with strictly ascending char_offsets.
 
@@ -159,62 +232,24 @@ def build_blob_and_index(lines: list[Line]) -> tuple[str, list[tuple[int, int, i
     normalized_texts = [normalize_line(line["text"]) for line in text_lines_raw]
     metadata = [(line["column"], line["line"]) for line in text_lines_raw]
 
-    # Step 3 & 4: Rejoin hyphens and build index in parallel
-    # We redo the rejoin logic here to track which original line each output line
-    # comes from, so we can build accurate index entries.
-    emitted_lines = []
-    index_entries = []
+    # Step 3: Rejoin hyphens using shared helper
+    # This returns (text, column, line) tuples with correct source coordinates
+    emitted_with_metadata = rejoin_hyphen_splits_with_metadata(
+        normalized_texts, metadata
+    )
 
-    i = 0
-    while i < len(normalized_texts):
-        current = normalized_texts[i]
-        current_col, current_line = metadata[i]
-        i += 1
+    # Extract just the texts for blob building
+    emitted_lines = [text for text, _, _ in emitted_with_metadata]
 
-        # Process current line, potentially merging with following lines
-        while i < len(normalized_texts) and current.endswith("-"):
-            next_text = normalized_texts[i]
-            if next_text and next_text[0].islower() and next_text[0].isascii():
-                # Merge: extract first word from next
-                space_index = next_text.find(" ")
-                if space_index == -1:
-                    moved_word = next_text
-                    remainder = ""
-                else:
-                    moved_word = next_text[:space_index]
-                    remainder = next_text[space_index + 1:]
-
-                # Rejoin current
-                current = current[:-1] + moved_word
-                i += 1
-
-                # If there's a remainder, emit current and continue with remainder
-                if remainder:
-                    emitted_lines.append(current)
-                    # Record this line's column and line number
-                    index_entries.append((current_col, current_line))
-                    current = remainder
-                # If no remainder, continue extending current with next-next
-            else:
-                break
-
-        # Emit final form of current
-        emitted_lines.append(current)
-        index_entries.append((current_col, current_line))
-
-    # Step 5: Build blob and calculate offsets
+    # Step 4: Build blob
     blob = " ".join(emitted_lines)
+
+    # Step 5: Build index with correct offsets
     index = []
     char_offset = 0
-    for col, line in index_entries:
+    for text, col, line in emitted_with_metadata:
         index.append((char_offset, col, line))
         # Move offset forward by this line's length + 1 (for space separator)
-        line_idx = len(index) - 1
-        char_offset += len(emitted_lines[line_idx]) + 1
-
-    # Remove the trailing +1 from the last offset (no space after last line)
-    if index:
-        last_char_offset, last_col, last_line = index[-1]
-        index[-1] = (last_char_offset, last_col, last_line)
+        char_offset += len(text) + 1
 
     return blob, index

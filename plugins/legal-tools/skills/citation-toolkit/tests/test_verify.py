@@ -211,6 +211,50 @@ class TestBuildBlobAndIndex:
         assert index[0][0] == 0
         assert index[1][0] == 10
 
+    def test_remainder_line_coordinates_single_split(self):
+        """Remainder after rejoin gets its source line's coordinates, not prior line's.
+
+        CRITICAL FIX: When 'accor-' merges with 'dance with the', the remainder
+        'with the' must have line=2 (its source), not line=1 (the prior line).
+        """
+        lines = [
+            {"column": 1, "line": 1, "text": "accor-", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "dance with the", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # After rejoin: "accordance" (from line 1+2) and "with the" (remainder from line 2)
+        assert blob == "accordance with the"
+        assert len(index) == 2
+        # First entry: joined word, should have line 1 coordinates
+        assert index[0] == (0, 1, 1)
+        # Second entry: remainder, should have line 2 coordinates (its source)
+        # Offset for "with the": "accordance" (10 chars) + space (1) = 11
+        assert index[1] == (11, 1, 2)
+
+    def test_remainder_line_coordinates_multi_split(self):
+        """Multi-split chain: remainders each get their own source line coordinates.
+
+        CRITICAL FIX: In ["con-", "sider it a-", "gain"]:
+        - "con-" merges with "sider it a-" → "consider", remainder "it a-" from line 2
+        - "it a-" merges with "gain" → "it again", no remainder
+        - Remainder "it a-" must be tagged with line 2, not line 1.
+        """
+        lines = [
+            {"column": 1, "line": 1, "text": "con-", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "sider it a-", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 3, "text": "gain", "bbox": (0, 40, 10, 50), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # After multi-split: "consider" (from lines 1+2) and "it again" (from lines 2+3)
+        assert blob == "consider it again"
+        assert len(index) == 2
+        # First entry: merged from lines 1 and part of 2, tagged with line 1
+        assert index[0] == (0, 1, 1)
+        # Second entry: remainder "it" from line 2, merged with "gain" from line 3
+        # but the remainder was tagged with line 2 (its source)
+        # Offset: "consider" (8 chars) + space (1) = 9
+        assert index[1] == (9, 1, 2)
+
     def test_empty_input_list(self):
         """Empty input list produces empty blob and empty index."""
         blob, index = build_blob_and_index([])
