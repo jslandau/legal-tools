@@ -22,6 +22,14 @@ import sys
 from pathlib import Path
 from typing import TypedDict
 
+from patent_query import (
+    parse_cite,
+    lookup,
+    AmbiguousCiteError,
+    CiteError,
+    AMBIGUITY_MAX_SPAN,
+)
+
 
 _WS = re.compile(r"\s+")
 
@@ -305,3 +313,205 @@ def resolve_span(
     start_col, start_line = _resolve_in(index, offsets, start)
     end_col, end_line = _resolve_in(index, offsets, end - 1)
     return (start_col, start_line, end_col, end_line)
+
+
+# PHASE 3: WINDOW COMPUTATION AND AMBIGUITY EXPANSION
+
+
+def _max_line_by_column(doc: dict) -> dict[int, int]:
+    """Compute maximum line number for each column in document.
+
+    Args:
+        doc: Patent document dict with "lines" key.
+
+    Returns:
+        Dictionary mapping column number to its maximum line number.
+    """
+    max_line_by_column: dict[int, int] = {}
+    for ln in doc["lines"]:
+        col = ln["column"]
+        line_num = ln["line"]
+        max_line_by_column[col] = max(max_line_by_column.get(col, 0), line_num)
+    return max_line_by_column
+
+
+def span_width(
+    doc: dict, start_col: int, start_line: int, end_col: int, end_line: int
+) -> int:
+    """Compute the number of slots in a citation span.
+
+    For same-column spans, returns the line count. For cross-column spans,
+    counts all slots across the columns in reading order.
+
+    Args:
+        doc: Patent document dict.
+        start_col, start_line, end_col, end_line: Span coordinates.
+
+    Returns:
+        Number of slots (lines) in the span.
+    """
+    max_line = _max_line_by_column(doc)
+
+    if start_col == end_col:
+        # Same column: count lines from start_line to end_line (inclusive)
+        return end_line - start_line + 1
+
+    # Cross-column: sum all lines in each column
+    width = 0
+    # Lines from start_col (start_line to its max)
+    width += max_line[start_col] - start_line + 1
+    # All lines in intermediate columns
+    for col in range(start_col + 1, end_col):
+        width += max_line[col]
+    # Lines in end_col (1 to end_line)
+    width += end_line
+
+    return width
+
+
+def window_bounds(
+    doc: dict, cited: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    """Compute the search window for a citation (±10%, min ±1, clamped).
+
+    AC4.1, AC4.2, AC4.3: Expands the cited span by ±10% margin (minimum ±1 line),
+    clamped to valid column line ranges.
+
+    Args:
+        doc: Patent document dict.
+        cited: Citation tuple (start_col, start_line, end_col, end_line).
+
+    Returns:
+        Window bounds tuple (start_col, start_line, end_col, end_line).
+    """
+    start_col, start_line, end_col, end_line = cited
+    width = span_width(doc, start_col, start_line, end_col, end_line)
+    margin = max(1, int(width * 0.10))
+    max_line = _max_line_by_column(doc)
+
+    return (
+        start_col,
+        max(1, start_line - margin),
+        end_col,
+        min(max_line[end_col], end_line + margin),
+    )
+
+
+def expanded_bounds(
+    doc: dict, cited: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    """Compute expanded bounds for ambiguity-triggered widening.
+
+    Uses a larger margin to ensure the span exceeds AMBIGUITY_MAX_SPAN
+    so re-gathering doesn't re-raise the ambiguity gate.
+
+    Args:
+        doc: Patent document dict.
+        cited: Citation tuple (start_col, start_line, end_col, end_line).
+
+    Returns:
+        Expanded bounds tuple (start_col, start_line, end_col, end_line).
+    """
+    start_col, start_line, end_col, end_line = cited
+    width = span_width(doc, start_col, start_line, end_col, end_line)
+    # Larger margin: max(AMBIGUITY_MAX_SPAN, 10% of width * 3)
+    margin = max(AMBIGUITY_MAX_SPAN, int(width * 0.10) * 3)
+    max_line = _max_line_by_column(doc)
+
+    return (
+        start_col,
+        max(1, start_line - margin),
+        end_col,
+        min(max_line[end_col], end_line + margin),
+    )
+
+
+def _lines_in_bounds(doc: dict, bounds: tuple[int, int, int, int]) -> list[dict]:
+    """Collect Line entries within coordinate bounds in reading order.
+
+    Gathers all Line dicts from doc["lines"] whose (column, line) falls
+    within the given bounds, in reading order (start_col from start_line to max,
+    intermediate columns fully, end_col up to end_line).
+
+    Args:
+        doc: Patent document dict.
+        bounds: Coordinate bounds tuple (start_col, start_line, end_col, end_line).
+
+    Returns:
+        List of Line dicts in reading order.
+    """
+    start_col, start_line, end_col, end_line = bounds
+    max_line = _max_line_by_column(doc)
+
+    result = []
+    # Build a map for efficient lookup
+    lines_by_coord = {}
+    for ln in doc["lines"]:
+        col = ln["column"]
+        line_num = ln["line"]
+        lines_by_coord[(col, line_num)] = ln
+
+    # Same column: start_line to end_line
+    if start_col == end_col:
+        for ln in range(start_line, end_line + 1):
+            if (start_col, ln) in lines_by_coord:
+                result.append(lines_by_coord[(start_col, ln)])
+    else:
+        # Cross-column: start_col from start_line to its max
+        for ln in range(start_line, max_line[start_col] + 1):
+            if (start_col, ln) in lines_by_coord:
+                result.append(lines_by_coord[(start_col, ln)])
+
+        # Intermediate columns fully
+        for col in range(start_col + 1, end_col):
+            for ln in range(1, max_line[col] + 1):
+                if (col, ln) in lines_by_coord:
+                    result.append(lines_by_coord[(col, ln)])
+
+        # End column from 1 to end_line
+        for ln in range(1, end_line + 1):
+            if (end_col, ln) in lines_by_coord:
+                result.append(lines_by_coord[(end_col, ln)])
+
+    return result
+
+
+def gather_window(doc: dict, cited: tuple[int, int, int, int]) -> dict:
+    """Gather window lines, with ambiguity detection and expansion.
+
+    AC5.1: Probes ambiguity on the CITED span (not the widened window).
+    If no ambiguity, returns normal window_bounds. If AmbiguousCiteError,
+    returns expanded_bounds with ambiguity flags set.
+
+    Args:
+        doc: Patent document dict.
+        cited: Citation tuple (start_col, start_line, end_col, end_line).
+
+    Returns:
+        Dictionary with:
+        - window_coord_range: Bounds tuple
+        - window_lines: List of Line dicts in the window
+        - ambiguity: Boolean (True if ambiguous)
+        - ambiguity_reason: String or None
+    """
+    # Probe ambiguity on the CITED span only
+    try:
+        lookup(doc, *cited)
+    except AmbiguousCiteError as e:
+        # Ambiguity detected: use expanded bounds
+        bounds = expanded_bounds(doc, cited)
+        return {
+            "window_coord_range": bounds,
+            "window_lines": _lines_in_bounds(doc, bounds),
+            "ambiguity": True,
+            "ambiguity_reason": e.reason,
+        }
+
+    # No ambiguity: use normal window bounds
+    bounds = window_bounds(doc, cited)
+    return {
+        "window_coord_range": bounds,
+        "window_lines": _lines_in_bounds(doc, bounds),
+        "ambiguity": False,
+        "ambiguity_reason": None,
+    }

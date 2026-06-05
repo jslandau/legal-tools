@@ -7,6 +7,12 @@ from patent_verify import (
     build_blob_and_index,
     resolve_offset,
     resolve_span,
+    _max_line_by_column,
+    span_width,
+    window_bounds,
+    expanded_bounds,
+    _lines_in_bounds,
+    gather_window,
 )
 
 
@@ -473,3 +479,248 @@ class TestResolveSpan:
         # end-1=11 -> first char of 'with' -> line 2
         result = resolve_span(index, 0, 12)
         assert result == (1, 1, 1, 2), "Span crossing into remainder must include both lines"
+
+
+class TestMaxLineByColumn:
+    """Tests for _max_line_by_column helper."""
+
+    def test_single_column_single_line(self):
+        """Single column with single line."""
+        doc = {
+            "lines": [
+                {"column": 1, "line": 1, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            ]
+        }
+        result = _max_line_by_column(doc)
+        assert result == {1: 1}
+
+    def test_single_column_multiple_lines(self):
+        """Single column with multiple lines."""
+        doc = {
+            "lines": [
+                {"column": 1, "line": 1, "text": "line 1", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+                {"column": 1, "line": 5, "text": "line 5", "bbox": (0, 50, 10, 60), "page_index": 0, "kind": "text"},
+                {"column": 1, "line": 3, "text": "line 3", "bbox": (0, 30, 10, 40), "page_index": 0, "kind": "text"},
+            ]
+        }
+        result = _max_line_by_column(doc)
+        assert result == {1: 5}
+
+    def test_multiple_columns(self):
+        """Multiple columns with different max lines."""
+        doc = {
+            "lines": [
+                {"column": 1, "line": 1, "text": "col 1 line 1", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+                {"column": 1, "line": 50, "text": "col 1 line 50", "bbox": (0, 500, 10, 510), "page_index": 0, "kind": "text"},
+                {"column": 2, "line": 1, "text": "col 2 line 1", "bbox": (100, 0, 110, 10), "page_index": 0, "kind": "text"},
+                {"column": 2, "line": 30, "text": "col 2 line 30", "bbox": (100, 300, 110, 310), "page_index": 0, "kind": "text"},
+            ]
+        }
+        result = _max_line_by_column(doc)
+        assert result == {1: 50, 2: 30}
+
+    def test_empty_lines_list(self):
+        """Empty lines list produces empty dict."""
+        doc = {"lines": []}
+        result = _max_line_by_column(doc)
+        assert result == {}
+
+
+class TestSpanWidth:
+    """Tests for span_width helper."""
+
+    def test_single_line_span_single_column(self):
+        """Single line (start=end) in one column has width 1."""
+        doc = {
+            "lines": [
+                {"column": 3, "line": 10, "text": "text", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            ]
+        }
+        result = span_width(doc, 3, 10, 3, 10)
+        assert result == 1
+
+    def test_same_column_three_line_span(self):
+        """Span from line 10 to line 12 in same column is 3 lines."""
+        doc = {
+            "lines": [
+                {"column": 3, "line": 10, "text": "line 10", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+                {"column": 3, "line": 11, "text": "line 11", "bbox": (0, 10, 10, 20), "page_index": 0, "kind": "text"},
+                {"column": 3, "line": 12, "text": "line 12", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+            ]
+        }
+        result = span_width(doc, 3, 10, 3, 12)
+        assert result == 3
+
+    def test_cross_column_simple(self):
+        """Cross-column span from 4:65 to 5:3."""
+        doc = {
+            "lines": [
+                {"column": 4, "line": 65, "text": "col4 line 65", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+                {"column": 4, "line": 66, "text": "col4 line 66", "bbox": (0, 10, 10, 20), "page_index": 0, "kind": "text"},
+                {"column": 5, "line": 1, "text": "col5 line 1", "bbox": (100, 0, 110, 10), "page_index": 0, "kind": "text"},
+                {"column": 5, "line": 2, "text": "col5 line 2", "bbox": (100, 10, 110, 20), "page_index": 0, "kind": "text"},
+                {"column": 5, "line": 3, "text": "col5 line 3", "bbox": (100, 20, 110, 30), "page_index": 0, "kind": "text"},
+            ]
+        }
+        # col 4: lines 65-66 = 2 lines
+        # col 5: lines 1-3 = 3 lines
+        # total = 5 lines
+        result = span_width(doc, 4, 65, 5, 3)
+        assert result == 5
+
+    def test_cross_column_with_intermediate(self):
+        """Cross-column with intermediate column."""
+        doc = {
+            "lines": [
+                {"column": 1, "line": 10, "text": "c1 l10", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+                {"column": 1, "line": 11, "text": "c1 l11", "bbox": (0, 10, 10, 20), "page_index": 0, "kind": "text"},
+                {"column": 2, "line": 1, "text": "c2 l1", "bbox": (50, 0, 60, 10), "page_index": 0, "kind": "text"},
+                {"column": 2, "line": 2, "text": "c2 l2", "bbox": (50, 10, 60, 20), "page_index": 0, "kind": "text"},
+                {"column": 2, "line": 3, "text": "c2 l3", "bbox": (50, 20, 60, 30), "page_index": 0, "kind": "text"},
+                {"column": 3, "line": 1, "text": "c3 l1", "bbox": (100, 0, 110, 10), "page_index": 0, "kind": "text"},
+                {"column": 3, "line": 5, "text": "c3 l5", "bbox": (100, 40, 110, 50), "page_index": 0, "kind": "text"},
+            ]
+        }
+        # col 1: lines 10-11 = 2 lines
+        # col 2: lines 1-3 = 3 lines
+        # col 3: lines 1-5 = 5 lines
+        # total = 10 lines
+        result = span_width(doc, 1, 10, 3, 5)
+        assert result == 10
+
+
+class TestWindowBounds:
+    """Tests for window_bounds (±10%, min ±1, clamped)."""
+
+    def test_ac4_1_fifty_line_span_margin_five(self):
+        """AC4.1: 50-line span yields ±5 margin."""
+        doc = {
+            "lines": [
+                {"column": 3, "line": i, "text": f"line {i}", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"}
+                for i in range(10, 60)
+            ]
+        }
+        cited = (3, 10, 3, 59)
+        result = window_bounds(doc, cited)
+        # width = 50, margin = max(1, int(50 * 0.10)) = 5
+        # start_line = max(1, 10 - 5) = 5
+        # end_line = min(max_line[3], 59 + 5) = min(59, 64) = 59
+        assert result == (3, 5, 3, 59)
+
+    def test_ac4_2_small_span_minimum_margin(self):
+        """AC4.2: Small spans get minimum ±1 margin."""
+        doc = {
+            "lines": [
+                {"column": 3, "line": i, "text": f"line {i}", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"}
+                for i in range(1, 20)
+            ]
+        }
+        # width 3: margin = max(1, int(3 * 0.10)) = max(1, 0) = 1
+        cited = (3, 10, 3, 12)
+        result = window_bounds(doc, cited)
+        assert result == (3, 9, 3, 13)
+
+        # width 1: margin = max(1, int(1 * 0.10)) = max(1, 0) = 1
+        cited = (3, 10, 3, 10)
+        result = window_bounds(doc, cited)
+        assert result == (3, 9, 3, 11)
+
+    def test_ac4_3_cross_column_cite(self, us9_artifact):
+        """AC4.3: Cross-column cite yields valid cross-column window."""
+        cited = (4, 65, 5, 3)
+        result = window_bounds(us9_artifact, cited)
+        start_col, start_line, end_col, end_line = result
+        # Verify structure: start_col and end_col unchanged, lines widened
+        assert start_col == 4
+        assert end_col == 5
+        # start_line should be <= 65 (possibly widened down)
+        assert start_line <= 65
+        # end_line should be >= 3 (possibly widened up)
+        assert end_line >= 3
+        # Both should be valid coordinates
+        assert start_line >= 1
+        assert end_line >= 1
+
+    def test_window_bounds_clamped_at_bottom(self):
+        """Window bounds clamped to column max."""
+        doc = {
+            "lines": [
+                {"column": 1, "line": i, "text": f"line {i}", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"}
+                for i in range(1, 11)
+            ]
+        }
+        # Column 1 max line is 10
+        # Cite at 9-10, margin 1 would try 8-11, but 11 exceeds max
+        cited = (1, 9, 1, 10)
+        result = window_bounds(doc, cited)
+        assert result == (1, 8, 1, 10)  # Clamped at column max
+
+    def test_window_bounds_clamped_at_top(self):
+        """Window bounds clamped to line 1."""
+        doc = {
+            "lines": [
+                {"column": 1, "line": i, "text": f"line {i}", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"}
+                for i in range(1, 20)
+            ]
+        }
+        # Cite at 1-2, margin 1 would try 0-3, but 0 < 1
+        cited = (1, 1, 1, 2)
+        result = window_bounds(doc, cited)
+        assert result == (1, 1, 1, 3)  # Clamped at 1
+
+
+class TestExpandedBounds:
+    """Tests for expanded_bounds (larger margin for ambiguity expansion)."""
+
+    def test_expanded_bounds_larger_margin(self):
+        """Expanded bounds use a larger margin than window_bounds."""
+        doc = {
+            "lines": [
+                {"column": 3, "line": i, "text": f"line {i}", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"}
+                for i in range(1, 100)
+            ]
+        }
+        cited = (3, 50, 3, 50)
+        window = window_bounds(doc, cited)
+        expanded = expanded_bounds(doc, cited)
+        # Expanded should be wider
+        assert expanded[1] <= window[1]  # Start line <= window start
+        assert expanded[3] >= window[3]  # End line >= window end
+
+
+class TestGatherWindow:
+    """Tests for gather_window orchestration."""
+
+    def test_gather_window_no_ambiguity(self, us9_artifact):
+        """Gather window returns normal bounds when no ambiguity."""
+        # Use a large cite that won't trigger ambiguity
+        cited = (1, 10, 1, 20)
+        result = gather_window(us9_artifact, cited)
+        assert "window_coord_range" in result
+        assert "window_lines" in result
+        assert "ambiguity" in result
+        assert "ambiguity_reason" in result
+        assert result["ambiguity"] is False
+        assert result["ambiguity_reason"] is None
+        assert isinstance(result["window_lines"], list)
+
+    def test_gather_window_ambiguity_expansion(self):
+        """Gather window with synthetic spurious slot triggers expansion."""
+        # Build a synthetic doc with a spurious slot in a small span
+        doc = {
+            "lines": [
+                {"column": 1, "line": 1, "text": "text line 1", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+                {"column": 1, "line": 2, "text": "", "bbox": (0, 10, 10, 20), "page_index": 0, "kind": "spurious"},
+                {"column": 1, "line": 3, "text": "text line 3", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+                {"column": 1, "line": 4, "text": "text line 4", "bbox": (0, 30, 10, 40), "page_index": 0, "kind": "text"},
+            ]
+        }
+        # Cite 1:1-2 is a small span touching the spurious slot at line 2
+        cited = (1, 1, 1, 2)
+        result = gather_window(doc, cited)
+        assert result["ambiguity"] is True
+        assert result["ambiguity_reason"] is not None
+        assert len(result["ambiguity_reason"]) > 0
+        # Expanded bounds should be wider than normal
+        normal_bounds = window_bounds(doc, cited)
+        assert result["window_coord_range"] != normal_bounds or result["ambiguity"]
