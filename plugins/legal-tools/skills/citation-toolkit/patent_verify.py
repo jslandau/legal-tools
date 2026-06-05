@@ -256,3 +256,41 @@ def resolve_offset(index: list[tuple[int, int, int]], offset: int) -> tuple[int,
 
     # Return (column, line) from the entry at pos
     return (index[pos][1], index[pos][2])
+
+
+def resolve_span(
+    index: list[tuple[int, int, int]], start: int, end: int
+) -> tuple[int, int, int, int]:
+    """Resolve an offset span to a coordinate range.
+
+    AC3.3, AC3.4: Map a blob character span [start, end) to a coordinate range
+    (start_col, start_line, end_col, end_line).
+
+    The span is half-open: [start, end), where end is exclusive. To ensure
+    the span's inclusive last character is resolved correctly, we use end-1
+    when resolving the end coordinate. This prevents a span ending exactly at
+    a line boundary from "bleeding" into the next line.
+
+    For a single-line match, start and end coordinates will be equal; formatting
+    of the output (e.g., "6:59" vs "6:59-6:59") is a caller concern.
+
+    AC3.4 invariant: If an offset falls inside a rejoined word (characters that
+    were moved from a later line during hyphenation), the resolve_offset function
+    correctly returns the starting line's coordinate (the line where the word
+    started), not the source line it was moved from.
+
+    Args:
+        index: List of (char_offset, column, line) tuples, strictly ascending by char_offset.
+        start: The blob character offset of the span's start (inclusive).
+        end: The blob character offset of the span's end (exclusive).
+
+    Returns:
+        (start_col, start_line, end_col, end_line) where each is from the respective
+        index entry's (column, line) fields.
+
+    Raises:
+        ValueError: If index is empty or any offset precedes the first index entry.
+    """
+    start_col, start_line = resolve_offset(index, start)
+    end_col, end_line = resolve_offset(index, end - 1)
+    return (start_col, start_line, end_col, end_line)

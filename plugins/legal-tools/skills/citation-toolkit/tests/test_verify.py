@@ -6,6 +6,7 @@ from patent_verify import (
     rejoin_hyphen_splits,
     build_blob_and_index,
     resolve_offset,
+    resolve_span,
 )
 
 
@@ -364,3 +365,111 @@ class TestResolveOffset:
         # Index starts at offset 0; any negative offset should fail
         with pytest.raises(ValueError):
             resolve_offset(index, -1)
+
+
+class TestResolveSpan:
+    """Tests for AC3.3, AC3.4: resolve offset range to coordinate range."""
+
+    def test_ac3_3_span_single_line(self):
+        """AC3.3: A span within a single line resolves to start/end on same line."""
+        lines = [
+            {"column": 1, "line": 1, "text": "hello world", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "goodbye", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Blob: "hello world goodbye"
+        # Index: [(0, 1, 1), (12, 1, 2)]
+        # Span [0, 5) covers "hello"
+        result = resolve_span(index, 0, 5)
+        assert result == (1, 1, 1, 1)
+
+    def test_ac3_3_span_across_two_lines(self):
+        """AC3.3: A span whose start/end land in different lines resolves correctly."""
+        lines = [
+            {"column": 1, "line": 1, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "world", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 3, "text": "end", "bbox": (0, 40, 10, 50), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Blob: "hello world end"
+        # Index: [(0, 1, 1), (6, 1, 2), (12, 1, 3)]
+        # Span [3, 10) covers "lo world"
+        result = resolve_span(index, 3, 10)
+        # start at offset 3 (in line 1), end at offset 9 (in line 2)
+        assert result == (1, 1, 1, 2)
+
+    def test_ac3_3_span_across_three_buckets(self):
+        """AC3.3: A span spanning three or more buckets resolves from first to last."""
+        lines = [
+            {"column": 1, "line": 1, "text": "one", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "two", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 3, "text": "three", "bbox": (0, 40, 10, 50), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Blob: "one two three"
+        # Index: [(0, 1, 1), (4, 1, 2), (8, 1, 3)]
+        # Span [1, 13) covers "ne two three"
+        result = resolve_span(index, 1, 13)
+        # start at offset 1 (in line 1), end at offset 12 (in line 3)
+        assert result == (1, 1, 1, 3)
+
+    def test_ac3_4_offset_inside_rejoined_word(self):
+        """AC3.4: An offset inside a rejoined word resolves to the starting line.
+
+        When 'accor-' merges with 'dance with the', the blob contains
+        'accordance with the'. The index tracks:
+        - Line 1 entry at offset 0: 'accordance' (joined from line 1+2)
+        - Line 2 entry at offset 11: 'with the' (remainder from line 2)
+
+        An offset inside 'accordance' (e.g., offset 5, which is within the
+        moved 'dance' fragment) must resolve to line 1 (where the word started),
+        not line 2 (where 'dance' came from).
+        """
+        lines = [
+            {"column": 1, "line": 1, "text": "accor-", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "dance with the", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Blob: "accordance with the"
+        # Index: [(0, 1, 1), (11, 1, 2)]
+        assert blob == "accordance with the"
+        assert len(index) == 2
+
+        # Offset 5 is inside 'accordance' (at 'n'), which came from the joined fragment
+        # It should resolve to line 1 (where the word started), not line 2
+        result = resolve_offset(index, 5)
+        assert result == (1, 1), "Offset inside rejoined word must resolve to starting line"
+
+        # Offset 10 is at 'e' in 'accordance', still within the joined word
+        result = resolve_offset(index, 10)
+        assert result == (1, 1), "Offset at end of rejoined word must still resolve to starting line"
+
+        # Offset 11 is at the start of 'with', which is from line 2's remainder
+        result = resolve_offset(index, 11)
+        assert result == (1, 2), "Offset at start of remainder must resolve to line 2"
+
+    def test_ac3_4_span_across_rejoined_word_boundary(self):
+        """AC3.4: A span touching the rejoined word boundary resolves correctly.
+
+        Test that when resolving a span [start, end), we use end-1 to get the
+        inclusive last character, so the span doesn't bleed into the next line.
+        """
+        lines = [
+            {"column": 1, "line": 1, "text": "accor-", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "dance with the", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Blob: "accordance with the"
+        # Index: [(0, 1, 1), (11, 1, 2)]
+
+        # Span [0, 11) covers "accordance " (the space before "with")
+        # start=0 -> line 1
+        # end-1=10 -> last char of 'accordance' -> line 1
+        result = resolve_span(index, 0, 11)
+        assert result == (1, 1, 1, 1), "Span ending at rejoined word boundary should not bleed to next line"
+
+        # Span [0, 12) covers "accordance w"
+        # start=0 -> line 1
+        # end-1=11 -> first char of 'with' -> line 2
+        result = resolve_span(index, 0, 12)
+        assert result == (1, 1, 1, 2), "Span crossing into remainder must include both lines"
