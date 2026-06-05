@@ -63,7 +63,8 @@ Status semantics:
                    fetch failure, or PDF body doesn't start with %PDF).
                    pdf_path, source_url, text_words are null.
   - "image_only": PDF fetched but text layer unusable (< MIN_TOTAL_WORDS words).
-                   pdf_path is set, source_url is set, text_words is 0.
+                   pdf_path is set, source_url is set, text_words is the
+                   true summed page_word_counts.
   - "rejected":   Kind not in {grant, apppub}. No network call.
                    pdf_path, source_url, text_words are null.
 
@@ -306,6 +307,8 @@ def fetch_one(entry: dict, cache_dir: Path) -> dict:
             usable = has_text_layer(counts)
             text_words = sum(counts)
         except Exception as e:
+            # Catch-all at pdfplumber boundary: any PDF parse failure degrades
+            # gracefully to not_located rather than crashing the shell.
             return {
                 "id": entry_id,
                 "status": "not_located",
@@ -323,7 +326,7 @@ def fetch_one(entry: dict, cache_dir: Path) -> dict:
             "kind": kind,
             "pdf_path": str(dest),
             "source_url": None,  # Cached; source URL not available
-            "text_words": text_words if usable else 0,
+            "text_words": text_words,
             "reason": None,
         }
 
@@ -359,6 +362,8 @@ def fetch_one(entry: dict, cache_dir: Path) -> dict:
         usable = has_text_layer(counts)
         text_words = sum(counts)
     except Exception as e:
+        # Catch-all at pdfplumber boundary: any PDF parse failure degrades
+        # gracefully to not_located rather than crashing the shell.
         return {
             "id": entry_id,
             "status": "not_located",
@@ -376,7 +381,7 @@ def fetch_one(entry: dict, cache_dir: Path) -> dict:
         "kind": kind,
         "pdf_path": str(dest),
         "source_url": pdf_url,
-        "text_words": text_words if usable else 0,
+        "text_words": text_words,
         "reason": None,
     }
 

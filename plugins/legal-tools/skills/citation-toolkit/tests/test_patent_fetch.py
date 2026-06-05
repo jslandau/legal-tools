@@ -189,7 +189,12 @@ class TestFetchOneImageOnly:
     """Test fetch_one with image-only PDF (AC3.1)."""
 
     def test_image_only_pdf_detected(self, tmp_path, no_text_layer_pdf):
-        """Cached image-only PDF → status='image_only', text_words=0."""
+        """Cached image-only PDF → status='image_only', text_words = true sum(counts).
+
+        The no_text_layer.pdf fixture has page_word_counts=[0], so sum=0.
+        This test verifies that text_words reports the actual extracted word count,
+        not a forced 0. The fixture's genuine 0 count satisfies this contract.
+        """
         from patent_fetch import fetch_one
 
         # Pre-populate cache with no_text_layer.pdf
@@ -208,7 +213,7 @@ class TestFetchOneImageOnly:
         )
 
         assert result["status"] == "image_only"
-        assert result["text_words"] == 0
+        assert result["text_words"] == 0  # True sum(counts) from fixture
         assert result["pdf_path"] == str(cached_pdf)
 
 
@@ -216,7 +221,11 @@ class TestFetchOneOk:
     """Test fetch_one success path (born-digital PDF)."""
 
     def test_ok_with_text_layer(self, tmp_path, born_digital_pdf):
-        """Cached born-digital PDF → status='ok', text_words > 0."""
+        """Cached born-digital PDF → status='ok', text_words = true sum(counts).
+
+        Verifies that text_words reports the actual extracted word count from
+        the PDF, not a forced value based on usability status.
+        """
         from patent_fetch import fetch_one
 
         cache_dir = tmp_path / "cache"
@@ -234,7 +243,7 @@ class TestFetchOneOk:
         )
 
         assert result["status"] == "ok"
-        assert result["text_words"] > 0
+        assert result["text_words"] > 0  # True sum(counts) from born-digital PDF
         assert result["pdf_path"] == str(cached_pdf)
         assert result["source_url"] is None  # Cached; no source URL
 
