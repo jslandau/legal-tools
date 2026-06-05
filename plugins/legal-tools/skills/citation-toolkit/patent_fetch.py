@@ -37,11 +37,14 @@ Input (JSON array on stdin or via --input). One object per patent:
     ]
 
   - id:                 opaque caller-supplied identifier; echoed back in output.
-  - kind:               "grant", "apppub", "design", "reissue", "plant", etc.
-                        Only "grant" and "apppub" are fetchable; others rejected.
+  - kind:               "grant" (utility/design/plant/reissue) or "apppub", as
+                        emitted by patent_ref.py. Only these two are fetchable; any
+                        other kind (e.g. "provisional", "unsupported") is rejected
+                        without a network call.
   - canonical_number:   patent number as a string, e.g., "8453642" for US8453642.
-                        For design/plant/reissue, the number includes the type
-                        code (e.g., "D645062", "PP12345", "RE38161").
+                        Design/plant/reissue grants carry kind="grant" with the
+                        type code kept in the number (e.g., "D645062", "PP12345",
+                        "RE38161").
 
 Output (JSON array on stdout, one object per input entry, same order):
 
