@@ -68,6 +68,9 @@ def rejoin_hyphen_splits(
     entire next line. Empty remainders are dropped from the result so they
     don't contribute zero-width index entries.
 
+    This is a thin wrapper over rejoin_hyphen_splits_with_metadata() that provides
+    a clean string-list interface while reusing the canonical rejoin algorithm.
+
     Args:
         lines: List of normalized line strings in reading order.
 
@@ -78,46 +81,16 @@ def rejoin_hyphen_splits(
     if not lines:
         return []
 
-    result = []
-    i = 0
-    while i < len(lines):
-        current = lines[i]
-        i += 1
+    # Create dummy metadata: each line tagged with a unique line number (column 0).
+    # The metadata values don't matter for the rejoin logic; we only care about
+    # the text sequences. Using (0, i) for each line keeps metadata uniform but distinct.
+    metadata = [(0, i) for i in range(len(lines))]
 
-        # Process current line, potentially multiple times if it gains words
-        # from successive splits
-        while i < len(lines) and current.endswith("-"):
-            next_line = lines[i]
-            # Check if next line starts with lowercase ASCII letter
-            if next_line and next_line[0].islower() and next_line[0].isascii():
-                # This is a split: extract the first word from next line
-                space_index = next_line.find(" ")
-                if space_index == -1:
-                    # Entire next line is one word; no remainder
-                    moved_word = next_line
-                    remainder = ""
-                else:
-                    # Split at first space
-                    moved_word = next_line[:space_index]
-                    remainder = next_line[space_index + 1:]  # Skip the space itself
+    # Call the canonical helper with dummy metadata
+    result_with_metadata = rejoin_hyphen_splits_with_metadata(lines, metadata)
 
-                # Rejoin: drop the trailing hyphen, append the moved word
-                current = current[:-1] + moved_word
-                i += 1
-
-                # If there's a remainder, we'll emit it and continue
-                if remainder:
-                    result.append(current)
-                    current = remainder
-                # If no remainder, keep extending current with next-next line
-            else:
-                # No split condition met: stop processing this line
-                break
-
-        # Emit the final form of current line
-        result.append(current)
-
-    return result
+    # Extract just the text from (text, column, line) tuples
+    return [text for text, _, _ in result_with_metadata]
 
 
 def rejoin_hyphen_splits_with_metadata(
