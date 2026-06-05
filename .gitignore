@@ -2,4 +2,7 @@ docs/
 skills/chain-cite/
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+patent_cache/
 .claude/settings.local.json
