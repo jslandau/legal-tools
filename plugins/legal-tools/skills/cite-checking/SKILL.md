@@ -125,6 +125,43 @@ Each result carries `status`, `section_text`, `subsection_text` (when a subsecti
 1. Cornell LII (law.cornell.edu) — covers FRCP, FRAP, FRE, and other federal rules. Not yet wired into `lii_fetcher.py`; navigate to title and section directly until the rules type is folded in.
 2. Direct court websites — Supreme Court Rules at supremecourt.gov
 
+**Patents (U.S. Patent Nos. and application publications):** Resolve and fetch via the two patent primitives in `citation-toolkit` — `patent_ref.py` (pure parse/classify) then `patent_fetch.py` (Google Patents fetch + usability gate). See `citation-toolkit`'s **Patents** citation-type and `PatentRef` schema for the parsed shape. Run as **two sequential batch passes** so the user is prompted at most twice for the whole batch, never per citation:
+
+*Phase A — Resolve.* Build one JSON array of every raw patent string from Stage 2 and parse the batch once:
+
+```bash
+python3 plugins/legal-tools/skills/citation-toolkit/patent_ref.py --input patent-refs.json > patent-refs-out.json
+```
+
+Each result is a `PatentRef` with `kind`, `canonical_number`, `fetchable`, `reason`. For any entry that comes back `kind="unsupported"`, ask the user **once, in a single batched prompt**, to classify it: pick the type (utility grant / design / plant / reissue / app-pub / provisional-skip) **and** confirm the number, with the parser's best-effort isolated digits (`canonical_number`) **pre-filled as an editable default** (single keystroke to accept, or erase to correct). Rebuild a `PatentRef` from each answer. `kind="provisional"` is a deliberate skip (not publicly retrievable) — flag it and move on. End of Phase A: every entry is either a fetchable `PatentRef` or an explicit skip. The pure parser never prompts; the asking lives here (same division as `lii_fetcher`'s `not_found` escalation).
+
+*Phase B — Fetch.* Pass all fetchable refs to the fetcher in one batch:
+
+```bash
+python3 plugins/legal-tools/skills/citation-toolkit/patent_fetch.py --input patent-fetch.json > patent-fetch-out.json
+```
+
+Each result carries `status` (`ok` | `not_located` | `image_only` | `rejected`), `pdf_path`, `source_url`, `text_words`. Collect the per-item outcomes, then ask the user **once** for local-copy paths covering all `not_located` and `image_only` failures in a single pass. Set `source.fetch_path` to `"patent"` on the citation entry. Failures are **non-fatal** — the batch continues for the rest.
+
+*Status handling:*
+- `ok` — text-layered PDF saved; route it (below).
+- `not_located` — Google page 404 / no `citation_pdf_url` / fetch failed. Flag `US X,XXX,XXX not located`; ask the user for a local copy (Phase-B prompt); if none, mark `unverifiable`.
+- `image_only` — fetched a valid PDF but it has no text layer. Flag `US X,XXX,XXX has no text layer — extraction unavailable`; ask for a local copy; the tool never OCRs on its own.
+- `rejected` — a non-fetchable kind reached the fetcher (provisional/unsupported). This should not occur after Phase A; if it does, treat as a skip and surface the `reason`.
+
+*Routing the `ok` results:*
+- `kind="grant"` → the patent **column:line extract/query pipeline** — `patent_extract.py` then `patent_query.py` (see `citation-toolkit`'s **Patent column:line extraction**). Patents are cited to `column:line`.
+- `kind="apppub"` → **paragraph-numbered handling**, processed *outside* the column:line pipeline (application publications are cited to paragraph `[0042]`, not column:line). This routing is out of scope for the extract/query pipeline here — flag the apppub for paragraph-based pincite handling.
+
+*Privilege note.* Fetching a public patent PDF sends only the **public patent number** outbound (to Google) — the opposite direction from the document-text confidentiality rule that governs extraction. No privileged document text leaves the machine.
+
+*Mixed-batch walkthrough.* Suppose Stage 2 surfaced four patent references: `US 8,453,642 B2`, `US 12,000,000` (a 2024 grant), `app no. 13/995,123 (garbled)`, and `60/123,456`.
+
+- **Phase A (resolve, one batch):** `8453642 → grant/fetchable`; `12000000 → grant/fetchable`; `13/995,123 → unsupported` (prompt the user once; the parser prefills its best-effort digits `13995123`, and **the user manually edits them** to the correct app-pub form `2013/0995123` — this digit change is the human-in-the-loop correction, not a parser transformation); `60/123,456 → provisional` (skip, flagged not-retrievable). After Phase A: three fetchable refs, one skip.
+- **Phase B (fetch, one batch):** `US8453642 → ok` (route to extract/query); `US12000000 → image_only` (2024 grants can be image-only even on Google — flag, ask for a local copy); `US20130995123 → ok` (apppub — route to paragraph handling); provisional was never fetched. The user is prompted once for the `image_only` local copy.
+
+Per-item status report: `ok` (8453642), `image_only` (12000000), `ok` (apppub), `rejected/skip` (provisional). One Phase-A prompt, one Phase-B prompt for the whole batch.
+
 **Constitutional provisions:**
 Text is resolved directly from the provision citation — no external lookup required for text. The text of U.S. constitutional provisions is settled; use the standard text.
 
