@@ -25,7 +25,7 @@ Consuming skills (e.g., `cite-checking`, `chain-cite`, `table-of-authorities`) i
 
 ## Extraction: eyecite is the primitive (local only)
 
-Every consuming skill in `legal-tools` starts with the same step — pull every citation out of a document. That step is **not** a free-form LLM scan. It runs [eyecite](https://github.com/freelawproject/eyecite), the Free Law Project's citation parser trained on 55M+ real citations. eyecite output is **authoritative** for the citation types it recognizes; the consuming-skill's manual pass exists only to fill known gaps (listed below), not to second-guess what eyecite already found.
+Every consuming skill in `legal-tools` starts with the same step — pull every citation out of a document. That step is **not** a free-form LLM scan. It runs [eyecite](https://github.com/freelawproject/eyecite), the Free Law Project's citation parser trained on 55M+ real citations. eyecite output is **authoritative** for the citation types it recognizes; the consuming-skill's LLM gap pass exists only to fill known gaps (listed below), not to second-guess what eyecite already found.
 
 ### Confidentiality: extraction runs locally — never over MCP
 
@@ -78,7 +78,7 @@ After running eyecite, the consuming skill must walk the document for these. Don
 1. **Extract:** Run eyecite once over the substantive text via the local `eyecite_extract.py` script. This produces a sorted, document-order list with short forms resolved.
 2. **Map onto the toolkit schemas.** The script already emits toolkit-shaped JSON; no manual mapping needed.
 3. **Walk for gaps.** Read the substantive text once, looking *only* for the gap categories. Don't re-extract what eyecite already found. When you find a gap-category citation, parse it manually into the appropriate schema.
-4. **Apply flags.** Unresolved short forms from eyecite → `unresolved_short_form`. Missing subsection on a statute → `ambiguous_section_reference`. Informal references resolved by the human pass → `informal_reference`.
+4. **Apply flags.** Unresolved short forms from eyecite → `unresolved_short_form`. Missing subsection on a statute → `ambiguous_section_reference`. Informal references resolved by the LLM gap pass → `informal_reference`.
 5. **Page/proposition tracking is still the skill's job.** eyecite gives you span offsets (character positions), not page numbers — the consuming skill maintains the offset→page map and the proposition for each citation.
 
 This split moves the deterministic work (parsing, short-form linking) out of the LLM and into eyecite, while reserving LLM judgment for the parts that genuinely need it (proposition extraction, gap-category recognition, support analysis).
@@ -137,7 +137,13 @@ Identify citations of these types. The consuming skill decides what to do with e
 - Design / plant / reissue grant: `D645,062` / `PP12,345` / `RE38,161` (letter prefix kept — it identifies the document)
 - Application publication: `U.S. Patent Application Pub. No. 2009/0151718 A1` (11-digit `YYYYNNNNNNN`; cited to paragraph `[0042]`, not column:line)
 - Provisional: `60/123,456` → not publicly retrievable; flag, do not fetch
-- Parsed by `patent_ref.py` into a `PatentRef` (see Structured Component Schemas). Patents are a **gap category** — eyecite does not emit them; they are caught in the Pass-2 manual walk.
+- Parsed by `patent_ref.py` into a `PatentRef` (see Structured Component Schemas). Patents are a **gap category** — eyecite does not emit them; they are caught in the Stage 2 Pass-2 LLM gap pass.
+
+**Recognizing patent cites in text** (the gap pass looks for all of these):
+- Long form, first mention: `U.S. Patent No. 8,453,642`, often with a parenthetical nickname `("the '642 patent")`.
+- **`'NNN` short form** (the dominant in-text form): `the '642 patent`, `the '298 patent` — an apostrophe + the last 3 digits of a grant number. This is the patent analog of `Id.`/`supra` and resolves against the citation stack to the most recent full patent number ending in those digits (see Short Forms).
+- **Pincite is `column:line`, not a page:** grants are cited `col. 5, ll. 12–18`, `5:12–18`, or `5:12`. Capture the column:line span as the pincite; it is consumed by the `patent_extract.py`/`patent_query.py` column:line pipeline.
+- **Application publications** are cited to **paragraph** `[0042]`, not column:line — capture the paragraph number as the pincite and route to paragraph handling, not the column:line pipeline.
 
 ---
 
@@ -150,6 +156,7 @@ Short forms require a **citation stack** — the running list of recently-cited 
 - Reporter-only: `[vol] [reporter] at [page]`
 - `supra` / `supra note [X]`
 - Informal references ("the Paxton court", "Daubert standard") → resolve to case; flag `informal_reference`
+- **Patent `'NNN` short form** ("the '642 patent", "the '298 patent") → resolve to the most recent full patent number on the stack whose grant number ends in those digits. eyecite does **not** emit patents, so unlike `Id.`/`supra` this is resolved by the LLM gap pass, not eyecite. If two stacked patents share the same last-3 digits, or none match, flag `unresolved_short_form`.
 
 When a short form cannot be confidently resolved, flag it as `unresolved_short_form` for user review rather than guessing.
 

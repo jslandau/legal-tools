@@ -63,7 +63,7 @@ Read the document. Identify the substantive pages to process:
 
 ## Stage 2 — Citation Extraction
 
-Extraction is a two-pass process: **eyecite first, then a focused human pass for the gap categories.** Do not LLM-scan the document for citations — that is what eyecite is for, and re-doing its work wastes tokens and introduces errors.
+Extraction is a two-pass process: **eyecite first, then a focused LLM gap pass for the gap categories.** Do not LLM-scan the document for *all* citations — that is what eyecite is for, and re-doing its work wastes tokens and introduces errors. The gap pass is a targeted read for only the categories eyecite cannot emit (below), not a free-form re-scan.
 
 **Pass 1 — eyecite (authoritative for recognized types).** Follow the **"Extraction: eyecite is the primitive (local only)"** section of `citation-toolkit`. Run the local `eyecite_extract.py` script in `citation-toolkit/` — extraction stays on-machine because briefs are routinely privileged. **Do NOT use the MCP's `extract_citations` or `analyze_citations` for this** (they upload the document text). The script's output is a JSON array of citations in document order with `Id.`/`supra`/short cites already linked to their antecedents — that *is* your citation stack for Stage 3, no manual re-derivation needed.
 
@@ -71,11 +71,17 @@ Extraction is a two-pass process: **eyecite first, then a focused human pass for
 
 Patent numbers are a gap category — eyecite does not emit them. Identify them here; resolution and fetching happen in Stage 4 via the two-phase patent path (see the **Patents** lookup block). Record the raw cited string and the proposition as for any gap cite; do not attempt to fetch during extraction.
 
+Recognize every patent-cite form (see `citation-toolkit`'s **Patents** recognition rules, which this skill owns the integration of):
+- **Long form** — `U.S. Patent No. 8,453,642`, often with a nickname parenthetical `("the '642 patent")`. Record the full number and add the nickname to the citation stack.
+- **`'NNN` short form** — `the '642 patent` / `the '298 patent`. Resolve against the stack to the full number ending in those digits (toolkit **Short Forms**); flag `unresolved_short_form` when ambiguous. This is the dominant in-text form — do not skip it.
+- **Pincite is `column:line`, not a page** — `col. 5, ll. 12–18`, `5:12–18`. Capture the column:line span as the citation's pincite; Stage 4 routes grants through the `patent_extract.py`/`patent_query.py` column:line pipeline that consumes it.
+- **Application publications** pincite to **paragraph** `[0042]` — capture the paragraph, route to paragraph handling (not column:line).
+
 **Pass 3 — proposition extraction.** For every citation (eyecite-extracted *and* gap-pass), capture the assertive clause it supports. eyecite returns the citation strings and their span offsets, not the propositional context — that is on you. Follow the **Proposition Extraction** rules in `citation-toolkit` (specific-assertion vs paragraph scope, mid-sentence and footnote handling, string-cite sharing, short-form propositions, `ambiguous_proposition` flag). Use the spans from Pass 1 to locate each citation in the source text precisely.
 
 Apply the **Parenthetical Handling** rules from `citation-toolkit` when deciding whether a parenthetical like `(quoting X)` or `(citing Y)` creates an independent citation entry.
 
-Maintain a **citation stack** only for gap-category cites and for any eyecite short forms flagged `unresolved_short_form` — eyecite already maintains the stack for everything else.
+Maintain a **citation stack** only for gap-category cites and for any eyecite short forms flagged `unresolved_short_form` — eyecite already maintains the stack for everything else. Patents belong in this stack: push each full patent number (and any nickname parenthetical) so the `'NNN` short form can be resolved back to it.
 
 ---
 
