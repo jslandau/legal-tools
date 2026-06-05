@@ -414,3 +414,6 @@ class TestLiveSmoke:
         assert result["text_words"] > 0
         assert result["pdf_path"] is not None
         assert result["source_url"] is not None
+        assert result["source_url"].startswith(
+            "https://patentimages.storage.googleapis.com"
+        )
