@@ -1,7 +1,7 @@
 """Tests for patent_verify: normalization + blob/index building."""
 import pytest
 
-from patent_verify import normalize_line, rejoin_hyphen_splits
+from patent_verify import normalize_line, rejoin_hyphen_splits, build_blob_and_index
 
 
 class TestNormalizeLine:
@@ -123,3 +123,115 @@ class TestRejoinHyphenSplits:
         """Single line without hyphen is unchanged."""
         result = rejoin_hyphen_splits(["hello world"])
         assert result == ["hello world"]
+
+
+class TestBuildBlobAndIndex:
+    """Tests for AC1.4, AC2.1, AC2.2: blob building and index creation."""
+
+    def test_ac1_4_filters_non_text_kinds(self):
+        """Only 'text' kind lines are included; blank/spurious/unknown omitted."""
+        lines = [
+            {"column": 1, "line": 1, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "blank"},
+            {"column": 1, "line": 3, "text": "world", "bbox": (0, 40, 10, 50), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Only "hello" and "world" included
+        assert "blank" not in blob
+        assert blob == "hello world"
+        assert len(index) == 2
+
+    def test_ac2_1_no_newlines_in_blob(self):
+        """Blob contains no newline characters."""
+        lines = [
+            {"column": 1, "line": 1, "text": "line one", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "line two", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        assert "\n" not in blob
+
+    def test_ac2_2_characters_preserved_in_order(self):
+        """Every character is preserved in the blob (modulo normalization)."""
+        lines = [
+            {"column": 1, "line": 1, "text": "abc def", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "ghi jkl", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Characters in order (spaces collapse, no newlines, join with single space)
+        assert blob == "abc def ghi jkl"
+
+    def test_index_one_entry_per_text_line(self):
+        """Index has one entry per text line."""
+        lines = [
+            {"column": 1, "line": 1, "text": "first", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 2, "line": 1, "text": "second", "bbox": (20, 0, 30, 10), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        assert len(index) == 2
+        # Check that each entry is (char_offset, column, line)
+        assert all(len(entry) == 3 for entry in index)
+
+    def test_index_offsets_strictly_ascending(self):
+        """Index offsets are strictly ascending."""
+        lines = [
+            {"column": 1, "line": 1, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "world", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        offsets = [entry[0] for entry in index]
+        # First line starts at 0: "hello" (5 chars) + space (1) = 6
+        # Second line starts at 6: "world"
+        assert offsets == [0, 6]
+        # Verify strictly ascending
+        for i in range(1, len(offsets)):
+            assert offsets[i] > offsets[i - 1]
+
+    def test_index_column_and_line_preserved(self):
+        """Index entries preserve column and line numbers from input."""
+        lines = [
+            {"column": 5, "line": 10, "text": "hello", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 5, "line": 11, "text": "world", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        assert index[0] == (0, 5, 10)
+        assert index[1] == (6, 5, 11)
+
+    def test_hyphen_split_rejoined_in_blob(self):
+        """Hyphen-split words are rejoined in the blob."""
+        lines = [
+            {"column": 1, "line": 1, "text": "com-", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "prises a widget", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # After rejoin: "comprises" and "a widget"
+        assert blob == "comprises a widget"
+        assert len(index) == 2
+        # First line offset is 0: "comprises" (9 chars) + space (1) = 10
+        # Second line offset is 10: "a widget"
+        assert index[0][0] == 0
+        assert index[1][0] == 10
+
+    def test_empty_input_list(self):
+        """Empty input list produces empty blob and empty index."""
+        blob, index = build_blob_and_index([])
+        assert blob == ""
+        assert index == []
+
+    def test_whitespace_collapsed_in_lines(self):
+        """Multiple spaces within a line collapse to single space."""
+        lines = [
+            {"column": 1, "line": 1, "text": "hello    world", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        # Normalized: "hello world"
+        assert blob == "hello world"
+
+    def test_only_blank_and_spurious_lines(self):
+        """If all lines are blank/spurious/unknown, blob is empty."""
+        lines = [
+            {"column": 1, "line": 1, "text": "", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "blank"},
+            {"column": 1, "line": 2, "text": "", "bbox": (0, 20, 10, 30), "page_index": 0, "kind": "spurious"},
+        ]
+        blob, index = build_blob_and_index(lines)
+        assert blob == ""
+        assert index == []

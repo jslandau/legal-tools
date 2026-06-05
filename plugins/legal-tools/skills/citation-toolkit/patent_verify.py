@@ -20,9 +20,23 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 
 _WS = re.compile(r"\s+")
+
+
+class Line(TypedDict):
+    """A reconstructed printed line from patent_extract artifact.
+
+    Invariant: text != "" iff kind == "text".
+    """
+    column: int
+    line: int
+    text: str
+    bbox: tuple[float, float, float, float]
+    page_index: int
+    kind: str
 
 
 def normalize_line(text: str) -> str:
@@ -102,3 +116,105 @@ def rejoin_hyphen_splits(lines: list[str]) -> list[str]:
         result.append(current)
 
     return result
+
+
+def build_blob_and_index(lines: list[Line]) -> tuple[str, list[tuple[int, int, int]]]:
+    """Build a clean blob and offset index from artifact lines.
+
+    AC1.4: Filters to text-kind lines only (blank/spurious/unknown omitted).
+    AC2.1: Blob contains no newlines (lines joined with single space).
+    AC2.2: Every character of every text line is preserved in reading order
+           (modulo collapsed whitespace and dropped line-break hyphens).
+
+    Steps:
+    1. Filter to kind == "text" lines.
+    2. Normalize each line's text (collapse whitespace, strip ends).
+    3. Rejoin line-break hyphens while tracking index entries.
+    4. Concatenate into a single blob using space as separator.
+    5. Return blob and index with strictly ascending char_offsets.
+
+    The PINNED representation ensures that when a line is split and rejoined:
+    - The moved word's characters are counted within the prior line's offset
+    - The remainder (if any) gets an offset pointing to its first character
+    - Empty remainders are dropped, preventing zero-width entries
+    - Offsets are strictly ascending (one entry per non-empty text line)
+
+    Args:
+        lines: List of Line dicts from an artifact, in reading order.
+
+    Returns:
+        (blob, index) where:
+        - blob: newline-free concatenation of normalized text lines
+        - index: list of (char_offset, column, line) tuples, one per emitted line
+    """
+    if not lines:
+        return "", []
+
+    # Step 1: Filter to text-kind lines
+    text_lines_raw = [line for line in lines if line["kind"] == "text"]
+    if not text_lines_raw:
+        return "", []
+
+    # Step 2: Normalize and collect metadata
+    normalized_texts = [normalize_line(line["text"]) for line in text_lines_raw]
+    metadata = [(line["column"], line["line"]) for line in text_lines_raw]
+
+    # Step 3 & 4: Rejoin hyphens and build index in parallel
+    # We redo the rejoin logic here to track which original line each output line
+    # comes from, so we can build accurate index entries.
+    emitted_lines = []
+    index_entries = []
+
+    i = 0
+    while i < len(normalized_texts):
+        current = normalized_texts[i]
+        current_col, current_line = metadata[i]
+        i += 1
+
+        # Process current line, potentially merging with following lines
+        while i < len(normalized_texts) and current.endswith("-"):
+            next_text = normalized_texts[i]
+            if next_text and next_text[0].islower() and next_text[0].isascii():
+                # Merge: extract first word from next
+                space_index = next_text.find(" ")
+                if space_index == -1:
+                    moved_word = next_text
+                    remainder = ""
+                else:
+                    moved_word = next_text[:space_index]
+                    remainder = next_text[space_index + 1:]
+
+                # Rejoin current
+                current = current[:-1] + moved_word
+                i += 1
+
+                # If there's a remainder, emit current and continue with remainder
+                if remainder:
+                    emitted_lines.append(current)
+                    # Record this line's column and line number
+                    index_entries.append((current_col, current_line))
+                    current = remainder
+                # If no remainder, continue extending current with next-next
+            else:
+                break
+
+        # Emit final form of current
+        emitted_lines.append(current)
+        index_entries.append((current_col, current_line))
+
+    # Step 5: Build blob and calculate offsets
+    blob = " ".join(emitted_lines)
+    index = []
+    char_offset = 0
+    for col, line in index_entries:
+        index.append((char_offset, col, line))
+        # Move offset forward by this line's length + 1 (for space separator)
+        line_idx = len(index) - 1
+        char_offset += len(emitted_lines[line_idx]) + 1
+
+    # Remove the trailing +1 from the last offset (no space after last line)
+    if index:
+        last_char_offset, last_col, last_line = index[-1]
+        index[-1] = (last_char_offset, last_col, last_line)
+
+    return blob, index
