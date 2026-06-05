@@ -498,7 +498,7 @@ The JSON file mirrors the analytical content of the Markdown but is keyed for pr
       },
       "source": {
         "found": true,
-        "fetch_path": "courtlistener-mcp | courtlistener-rest | lii | google-scholar | justia | direct-court | user-provided | none",
+        "fetch_path": "courtlistener-mcp | courtlistener-rest | lii | google-scholar | justia | direct-court | patent | user-provided | none",
         "courtlistener": {
           "cluster_id": "108494",
           "opinion_id": "9424801",
