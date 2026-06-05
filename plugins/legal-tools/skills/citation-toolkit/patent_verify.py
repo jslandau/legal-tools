@@ -247,14 +247,21 @@ def resolve_offset(index: list[tuple[int, int, int]], offset: int) -> tuple[int,
     if not index:
         raise ValueError("index is empty")
 
-    # Build the offsets list and use bisect to find the greatest offset <= target
     offsets = [e[0] for e in index]
-    pos = bisect.bisect_right(offsets, offset) - 1
+    return _resolve_in(index, offsets, offset)
 
+
+def _resolve_in(
+    index: list[tuple[int, int, int]], offsets: list[int], offset: int
+) -> tuple[int, int]:
+    """Resolve an offset against a precomputed offsets list (shared core).
+
+    Lets resolve_span build the offsets list once for both endpoint lookups
+    instead of rebuilding it per resolve_offset call.
+    """
+    pos = bisect.bisect_right(offsets, offset) - 1
     if pos < 0:
         raise ValueError(f"offset {offset} precedes the first index entry")
-
-    # Return (column, line) from the entry at pos
     return (index[pos][1], index[pos][2])
 
 
@@ -291,6 +298,10 @@ def resolve_span(
     Raises:
         ValueError: If index is empty or any offset precedes the first index entry.
     """
-    start_col, start_line = resolve_offset(index, start)
-    end_col, end_line = resolve_offset(index, end - 1)
+    if not index:
+        raise ValueError("index is empty")
+
+    offsets = [e[0] for e in index]
+    start_col, start_line = _resolve_in(index, offsets, start)
+    end_col, end_line = _resolve_in(index, offsets, end - 1)
     return (start_col, start_line, end_col, end_line)
