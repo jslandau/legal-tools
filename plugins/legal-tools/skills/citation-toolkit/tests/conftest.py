@@ -36,3 +36,16 @@ def claims_tail_pdf() -> Path:
     the header-midpoint gutter fallback and the body-page voting rule on a page that
     no single hard gate would admit."""
     return FIXTURES / "US8131198.pdf"
+
+
+@pytest.fixture
+def us9_artifact(tmp_path: Path) -> dict:
+    """Build and load the US9154231 artifact once for all tests."""
+    from patent_extract import build_document, write_document, load_document
+
+    pdf = FIXTURES / "US9154231.pdf"
+    artifact_path = tmp_path / "us9.json"
+
+    doc = build_document(pdf)
+    write_document(doc, artifact_path)
+    return load_document(artifact_path)

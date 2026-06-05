@@ -11,19 +11,6 @@ import pytest
 
 
 @pytest.fixture
-def us9_artifact(tmp_path: Path) -> dict:
-    """Build and load the US9154231 artifact once for all tests."""
-    from patent_extract import build_document, write_document, load_document
-
-    pdf = Path(__file__).resolve().parent.parent / "test_fixtures" / "US9154231.pdf"
-    artifact_path = tmp_path / "us9.json"
-
-    doc = build_document(pdf)
-    write_document(doc, artifact_path)
-    return load_document(artifact_path)
-
-
-@pytest.fixture
 def us4_artifact(tmp_path: Path) -> dict:
     """Build and load the US4731298 artifact once for all tests."""
     from patent_extract import build_document, write_document, load_document
