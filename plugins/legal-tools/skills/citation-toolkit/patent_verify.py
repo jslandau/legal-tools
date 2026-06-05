@@ -78,9 +78,6 @@ def rejoin_hyphen_splits(
         List of line strings with hyphens rejoined where appropriate.
         One entry per original line (minus dropped empty remainders).
     """
-    if not lines:
-        return []
-
     # Create dummy metadata: each line tagged with a unique line number (column 0).
     # The metadata values don't matter for the rejoin logic; we only care about
     # the text sequences. Using (0, i) for each line keeps metadata uniform but distinct.
