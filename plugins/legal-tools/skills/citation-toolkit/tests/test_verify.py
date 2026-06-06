@@ -713,7 +713,7 @@ class TestGatherWindow:
         assert isinstance(result["window_lines"], list)
 
     def test_gather_window_ambiguity_expansion(self):
-        """Gather window with synthetic spurious slot triggers expansion."""
+        """AC5.1: Gather window with synthetic spurious slot triggers expansion."""
         # Build a synthetic doc with a spurious slot in a small span
         doc = {
             "lines": [

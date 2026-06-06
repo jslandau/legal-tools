@@ -747,7 +747,10 @@ def verify_resolve(
     Args:
         doc: Patent document dict.
         substring: The text to search for (may have whitespace variations).
-        within: Citation string for the search bounds (e.g., "5:1-3").
+        within: Citation string for the search bounds (e.g., "5:1-3"). Expected to
+            be the emit step's window_coord_range (already grid-drift-expanded when
+            the cited span was ambiguous), not the raw human cite; the window is
+            built from these bounds verbatim via _lines_in_bounds (no re-expansion).
         retried: Boolean flag indicating if this is a retry with expanded anchor.
 
     Returns:
