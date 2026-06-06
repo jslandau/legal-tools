@@ -24,6 +24,7 @@ from typing import TypedDict
 
 from patent_query import (
     lookup,
+    parse_cite,
     AmbiguousCiteError,
     CiteError,
     AMBIGUITY_MAX_SPAN,
@@ -673,3 +674,95 @@ def gather_window(doc: dict, cited: tuple[int, int, int, int]) -> dict:
         "ambiguity": False,
         "ambiguity_reason": None,
     }
+
+
+# PHASE 5: IMPERATIVE SHELL (CLI PRIMITIVES)
+
+
+def _body_lines(doc: dict) -> list[dict]:
+    """Gather all text-kind body lines from document.
+
+    Helper to collect the lines that form the "full document body" for
+    quote verification. Filters to kind=="text" lines only.
+
+    Args:
+        doc: Patent document dict with "lines" key.
+
+    Returns:
+        List of Line dicts with kind=="text", in document order.
+    """
+    return [ln for ln in doc["lines"] if ln.get("kind", "text") == "text"]
+
+
+def verify_emit(doc: dict, cite: str) -> dict:
+    """Emit a normalized quote for verification.
+
+    Given a patent document and a citation, normalizes the citation and
+    computes the surrounding window blob for quote verification, along
+    with the full body blob for duplicate detection.
+
+    Args:
+        doc: Patent document dict (from patent_extract artifact).
+        cite: Citation string (e.g., "5:1-3").
+
+    Returns:
+        Dictionary with keys:
+        - cite: The input citation string
+        - cited_coord: List of 4 integers [start_col, start_line, end_col, end_line]
+        - window_coord_range: List of 4 integers [start_col, start_line, end_col, end_line]
+        - window_blob: Normalized text of window (no newlines)
+        - body_blob: Normalized text of full body (no newlines)
+        - ambiguity: Boolean flag
+        - ambiguity_reason: String or None
+
+    Raises:
+        CiteError: Malformed citation or out-of-range.
+    """
+    cited = parse_cite(cite)
+    gw = gather_window(doc, cited)
+
+    # Build blobs for window and body
+    window_blob, _ = build_blob_and_index(gw["window_lines"])
+    body_blob, _ = build_blob_and_index(_body_lines(doc))
+
+    return {
+        "cite": cite,
+        "cited_coord": list(cited),
+        "window_coord_range": list(gw["window_coord_range"]),
+        "window_blob": window_blob,
+        "body_blob": body_blob,
+        "ambiguity": gw["ambiguity"],
+        "ambiguity_reason": gw["ambiguity_reason"],
+    }
+
+
+def verify_resolve(
+    doc: dict, substring: str, within: str, retried: bool
+) -> dict:
+    """Resolve an LLM-supplied substring to a column:line coordinate.
+
+    Given a document, a substring to find, and a coordinate range to search
+    within, resolves the substring to its column:line location.
+
+    Args:
+        doc: Patent document dict.
+        substring: The text to search for (may have whitespace variations).
+        within: Citation string for the search bounds (e.g., "5:1-3").
+        retried: Boolean flag indicating if this is a retry with expanded anchor.
+
+    Returns:
+        Dictionary from resolve() with keys:
+        - found_at: Coordinate string, list of strings, or None
+        - match_scope: "window" or "body" (if found_at is set)
+        - ambiguous_match: Boolean (if multiple hits)
+        - hits: Integer count (if ambiguous)
+        - retry: String instruction (if ambiguous and not retried)
+
+    Raises:
+        CiteError: Malformed or out-of-range citation bounds.
+    """
+    bounds = parse_cite(within)
+    window_blob, window_index = build_blob_and_index(_lines_in_bounds(doc, bounds))
+    body_blob, body_index = build_blob_and_index(_body_lines(doc))
+
+    return resolve(window_blob, window_index, body_blob, body_index, substring, retried)

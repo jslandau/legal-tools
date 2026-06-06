@@ -15,6 +15,8 @@ from patent_verify import (
     gather_window,
     _find_all,
     resolve,
+    verify_emit,
+    verify_resolve,
 )
 
 
@@ -987,3 +989,83 @@ class TestResolveWithWhitespaceGuard:
         assert "found_at" in result
         assert isinstance(result["found_at"], list)
         assert len(result["found_at"]) > 0
+
+
+class TestVerifyEmit:
+    """Tests for AC7.4: verify_emit handler."""
+
+    def test_emit_from_artifact(self, us9_artifact):
+        """verify_emit against a known cite yields documented output shape."""
+        # Use a known cite from us9154231
+        cite = "5:1-3"
+        result = verify_emit(us9_artifact, cite)
+
+        # Check all documented keys are present
+        assert "cite" in result
+        assert "cited_coord" in result
+        assert "window_coord_range" in result
+        assert "window_blob" in result
+        assert "body_blob" in result
+        assert "ambiguity" in result
+        assert "ambiguity_reason" in result
+
+        # Check types and non-empty constraints
+        assert result["cite"] == cite
+        assert isinstance(result["cited_coord"], (list, tuple))
+        assert len(result["cited_coord"]) == 4
+        assert all(isinstance(x, int) for x in result["cited_coord"])
+
+        assert isinstance(result["window_coord_range"], (list, tuple))
+        assert len(result["window_coord_range"]) == 4
+
+        # Blobs are non-empty strings with no newlines
+        assert isinstance(result["window_blob"], str)
+        assert result["window_blob"]  # non-empty
+        assert "\n" not in result["window_blob"]
+
+        assert isinstance(result["body_blob"], str)
+        assert result["body_blob"]  # non-empty
+        assert "\n" not in result["body_blob"]
+
+        # Ambiguity is bool
+        assert isinstance(result["ambiguity"], bool)
+        # ambiguity_reason is None or str
+        assert result["ambiguity_reason"] is None or isinstance(
+            result["ambiguity_reason"], str
+        )
+
+
+class TestVerifyResolve:
+    """Tests for AC7.4: verify_resolve handler."""
+
+    def test_resolve_unique_in_window(self):
+        """verify_resolve with substring unique in window returns found_at + match_scope."""
+        # Create a small synthetic document with known lines
+        doc = {
+            "lines": [
+                {
+                    "column": 1,
+                    "line": 1,
+                    "text": "the quick brown",
+                    "bbox": (0, 0, 10, 10),
+                    "page_index": 0,
+                    "kind": "text",
+                },
+                {
+                    "column": 1,
+                    "line": 2,
+                    "text": "fox jumps over",
+                    "bbox": (0, 10, 10, 20),
+                    "page_index": 0,
+                    "kind": "text",
+                },
+            ]
+        }
+
+        # Resolve "quick" which is unique in the window
+        result = verify_resolve(doc, "quick", "1:1-2", retried=False)
+
+        assert "found_at" in result
+        assert result["found_at"] is not None
+        assert "match_scope" in result
+        assert result["match_scope"] == "window"
