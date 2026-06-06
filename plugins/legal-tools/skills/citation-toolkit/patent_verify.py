@@ -453,16 +453,16 @@ def resolve(
             "hits": len(hits_to_resolve),
             "retry": "pass a longer/more distinctive substring",
         }
-    else:
-        # Retried: return all hits as list of coordinate strings
-        found_at_list = [
-            _fmt(resolve_span(index_to_use, hit, hit + len(needle)))
-            for hit in hits_to_resolve
-        ]
-        return {
-            "ambiguous_match": True,
-            "found_at": found_at_list,
-        }
+
+    # Retried: return all hits as list of coordinate strings
+    found_at_list = [
+        _fmt(resolve_span(index_to_use, hit, hit + len(needle)))
+        for hit in hits_to_resolve
+    ]
+    return {
+        "ambiguous_match": True,
+        "found_at": found_at_list,
+    }
 
 
 # PHASE 3: WINDOW COMPUTATION AND AMBIGUITY EXPANSION
