@@ -575,7 +575,7 @@ Or via stdin. The script is stdlib-only — no `pip install` required.
 
 ## Patent column:line extraction
 
-US patent documents cite column and line numbers — e.g., `4:32-38` means column 4, lines 32–38 — to pinpoint passages in their specification. This skill provides tools to extract and query these citations locally without leaving the machine.
+US patent documents cite column and line numbers — e.g., `4:32-38` means column 4, lines 32–38 — to pinpoint passages in their specification. This skill provides tools to extract, query, and verify these citations locally without leaving the machine.
 
 ### Build phase: `patent_extract.py`
 
@@ -638,9 +638,30 @@ Exit codes: 0 (ok) / 1 (cite error: malformed, out of range, column absent) / 2 
 
 The query script is stdlib-only — no dependencies beyond Python 3.
 
+### Verify phase: `patent_verify.py`
+
+Querying returns the text *at* a cite. Verifying answers a different question: does a brief's quoted passage actually appear at (or near) the cite it claims? `patent_verify.py` supports an LLM-driven quote-location ladder — the script does the deterministic normalization and coordinate math; the model does the matching (it never sees the brief's quote, only blob text the script emits).
+
+It is a batch-JSON primitive like `patent_ref.py`/`patent_fetch.py`: a JSON array of request objects on `--input` (or stdin) → a JSON array of results on stdout, echoing each entry's `id` in order. Each entry carries a `mode` and its own `artifact_path` (loaded per entry; a missing or unreadable artifact yields a `status:"error"` result object, not a hard exit — only malformed top-level JSON input exits 2).
+
+```bash
+# emit: normalize the cited region into a clean blob the LLM can match against
+echo '[{"id":"e1","mode":"emit","artifact_path":"us9.json","cite":"5:1-10"}]' \
+  | python3 plugins/legal-tools/skills/citation-toolkit/patent_verify.py
+
+# resolve: locate a verbatim slice (copied from the emitted blob) back to a coordinate
+echo '[{"id":"r1","mode":"resolve","artifact_path":"us9.json","substring":"a widget that","within":"5:1-14","retried":false}]' \
+  | python3 plugins/legal-tools/skills/citation-toolkit/patent_verify.py
+```
+
+- **`emit`** returns `window_blob` (the cited region ±10% expanded) and `body_blob` (the whole specification), both newline-free, plus `cited_coord`, `window_coord_range`, and an `ambiguity` flag (set when the cited region touches a `spurious`/`unknown` slot — the grid drift signal from the query layer, here triggering a wider window rather than an error).
+- **`resolve`** takes a substring the LLM matched and returns `found_at` (a `c:l` or `sc:sl-ec:el` coordinate string) with `match_scope` (`"window"` or `"body"` — the tier the hit came from). It searches the window first, then the full body in a single call. Multiple hits return `ambiguous_match` (with a `retry` instruction, or — when `retried:true` — all hit coordinates), never a silent first-hit. The re-normalize guard is whitespace-only and case-exact: a whitespace slip still resolves, but a case difference does not (patents capitalize defined terms deliberately).
+
+The LLM-facing ladder that drives these two modes is documented in `cite-checking`'s Stage 5. `patent_verify.py` is stdlib-only and imports cite parsing / ambiguity detection from `patent_query.py` rather than reimplementing them.
+
 ### Architecture
 
-The build-once/query-many split is intentional. The geometric complexity (gutter detection, line-model fitting, per-page marker-residual confidence) lives in `patent_extract.py`. The query layer (`patent_query.py`) sees only the finalized artifact — it is a pure function over JSON, suitable for downstream consumption by cite-check without exposing linemodel internals.
+The build-once/query-many split is intentional. The geometric complexity (gutter detection, line-model fitting, per-page marker-residual confidence) lives in `patent_extract.py`. The query and verify layers (`patent_query.py`, `patent_verify.py`) see only the finalized artifact — they are pure functions over JSON, suitable for downstream consumption by cite-check without exposing linemodel internals. `patent_query.py` resolves a cite to its text; `patent_verify.py` builds the normalized blobs and coordinate index that let an LLM confirm a brief's quote sits at the cite. Both reuse `patent_query`'s cite parsing and ambiguity detection rather than duplicating it.
 
 ### Privacy and scope
 
