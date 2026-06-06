@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import TypedDict
 
 from patent_query import (
-    parse_cite,
     lookup,
     AmbiguousCiteError,
     CiteError,
@@ -402,8 +401,12 @@ def expanded_bounds(
 ) -> tuple[int, int, int, int]:
     """Compute expanded bounds for ambiguity-triggered widening.
 
-    Uses a larger margin to ensure the span exceeds AMBIGUITY_MAX_SPAN
-    so re-gathering doesn't re-raise the ambiguity gate.
+    Uses a larger margin (max(AMBIGUITY_MAX_SPAN, 10% * 3)) to help clear
+    the small-span ambiguity gate. This is best-effort grid-drift widening:
+    on short columns (near top/bottom boundaries), bottom/top clamps can
+    prevent the span from reaching width >= AMBIGUITY_MAX_SPAN. However,
+    gather_window does not re-probe the expanded bounds, so the expanded span
+    never re-raises the ambiguity gate (even if residual ambiguity persists).
 
     Args:
         doc: Patent document dict.
@@ -493,6 +496,10 @@ def gather_window(doc: dict, cited: tuple[int, int, int, int]) -> dict:
         - window_lines: List of Line dicts in the window
         - ambiguity: Boolean (True if ambiguous)
         - ambiguity_reason: String or None
+
+    Raises:
+        CiteError: Out-of-range or absent column. Caller (Imperative Shell,
+        Phase 5+) handles and converts to error result object.
     """
     # Probe ambiguity on the CITED span only
     try:

@@ -724,3 +724,48 @@ class TestGatherWindow:
         # Expanded bounds should be wider than normal
         normal_bounds = window_bounds(doc, cited)
         assert result["window_coord_range"] != normal_bounds or result["ambiguity"]
+
+    def test_gather_window_probes_cited_span_not_window(self):
+        """Probe must check CITED span, not window, to catch ambiguity gate.
+
+        This test validates the cited-span-probe invariant: the ambiguity gate
+        only fires for small spans (width < 5). If we probed the window instead,
+        a small cited span (width < 5) that expands to window width >= 5 would
+        silently pass the probe and never trigger the expansion path.
+
+        Scenario: a long column with a spurious slot inside a small (width < 5)
+        cited span. The window's ±10% margin pushes the window to width >= 5,
+        making probing the window a dead path. We verify by asserting that
+        gather_window detects the ambiguity (because the CITED span is small
+        and touches the gate), even though the WINDOW would silently pass.
+        """
+        # Build a synthetic doc: long column (20 lines) with one spurious slot
+        lines = [
+            {"column": 1, "line": i, "text": f"text line {i}", "bbox": (0, i*10, 10, (i+1)*10), "page_index": 0, "kind": "text"}
+            for i in range(1, 21)
+        ]
+        # Inject a spurious slot at line 12 (in the middle)
+        lines[11] = {"column": 1, "line": 12, "text": "", "bbox": (0, 120, 10, 130), "page_index": 0, "kind": "spurious"}
+
+        doc = {"lines": lines}
+
+        # Cite a small span (width 3) that includes the spurious slot at line 12
+        cited = (1, 11, 1, 13)  # lines 11, 12 (spurious), 13 -> width 3
+
+        # Verify cited span is small (width < 5)
+        from patent_verify import span_width, window_bounds
+        cited_width = span_width(doc, *cited)
+        assert cited_width < 5, f"cited span width {cited_width} should be < 5"
+
+        # Verify window expands cited span to >= 5
+        window = window_bounds(doc, cited)
+        window_width = span_width(doc, *window)
+        assert window_width >= 5, f"window width {window_width} should be >= 5 to validate dead-path detection"
+
+        # Now call gather_window: it should detect ambiguity on the CITED span
+        # (which is small and touches the spurious gate), even though the window
+        # itself would silently pass if we probed there.
+        result = gather_window(doc, cited)
+        assert result["ambiguity"] is True, "gather_window must detect ambiguity (probes CITED span, not window)"
+        assert result["ambiguity_reason"] is not None
+        assert len(result["ambiguity_reason"]) > 0
