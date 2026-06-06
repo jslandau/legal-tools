@@ -766,3 +766,145 @@ def verify_resolve(
     body_blob, body_index = build_blob_and_index(_body_lines(doc))
 
     return resolve(window_blob, window_index, body_blob, body_index, substring, retried)
+
+
+def process(entries: list[dict]) -> list[dict]:
+    """Batch process quote-verification entries.
+
+    Reads a list of entry dicts, each with:
+    - id: unique identifier
+    - mode: "emit" or "resolve"
+    - artifact_path: path to patent_extract artifact JSON
+    - (per mode) cite (emit) or substring/within/retried (resolve)
+
+    For each entry:
+    1. Load artifact from artifact_path (or error if missing/unreadable)
+    2. Dispatch by mode:
+       - "emit": call verify_emit(doc, cite)
+       - "resolve": call verify_resolve(doc, substring, within, retried)
+    3. Append result with id echoed
+
+    A missing artifact or dispatch error yields error result object (not hard exit).
+
+    Args:
+        entries: List of entry dicts (each must be a dict, or ValueError raised).
+
+    Returns:
+        List of result dicts, one per entry, with id echoed.
+
+    Raises:
+        ValueError: If any entry is not a dict.
+    """
+    results = []
+
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"array element at index {i} is not a dict (got {type(entry).__name__})"
+            )
+
+        entry_id = entry.get("id")
+        mode = entry.get("mode")
+
+        # Load artifact
+        path = Path(entry.get("artifact_path", ""))
+        if not path.exists():
+            results.append(
+                {
+                    "id": entry_id,
+                    "status": "error",
+                    "error": f"no such artifact: {path}",
+                }
+            )
+            continue
+
+        # Try to load artifact JSON
+        try:
+            with open(path, encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            results.append(
+                {
+                    "id": entry_id,
+                    "status": "error",
+                    "error": f"failed to load artifact: {e}",
+                }
+            )
+            continue
+
+        # Dispatch by mode
+        try:
+            if mode == "emit":
+                result = verify_emit(doc, entry["cite"])
+            elif mode == "resolve":
+                result = verify_resolve(
+                    doc,
+                    entry["substring"],
+                    entry["within"],
+                    bool(entry.get("retried", False)),
+                )
+            else:
+                result = {"status": "error", "error": f"unknown mode: {mode!r}"}
+        except (CiteError, KeyError) as e:
+            result = {"status": "error", "error": str(e)}
+
+        # Append result with id
+        results.append({"id": entry_id, **result})
+
+    return results
+
+
+def main(argv: list[str]) -> int:
+    """CLI entry point for batch quote-verification.
+
+    Reads JSON array from --input file or stdin, processes via process(),
+    outputs JSON array to stdout.
+
+    Args:
+        argv: Command-line arguments (sys.argv[1:]).
+
+    Returns:
+        0 on success, 2 on input/validation error.
+    """
+    parser = argparse.ArgumentParser(
+        description="Verify patent quote location: emit normalized blobs or resolve a matched substring to column:line. Reads a JSON array of requests; writes a JSON array of results to stdout."
+    )
+    parser.add_argument(
+        "--input", help="Path to input JSON file. If omitted, read stdin."
+    )
+    args = parser.parse_args(argv)
+
+    # Read input
+    payload = (
+        open(args.input, encoding="utf-8").read()
+        if args.input
+        else sys.stdin.read()
+    )
+
+    # Parse JSON
+    try:
+        entries = json.loads(payload)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"ERROR: input is not valid JSON: {e}\n")
+        return 2
+
+    # Validate array
+    if not isinstance(entries, list):
+        sys.stderr.write("ERROR: input JSON must be an array of request objects.\n")
+        return 2
+
+    # Process
+    try:
+        results = process(entries)
+    except ValueError as e:
+        sys.stderr.write(f"ERROR: invalid array element: {e}\n")
+        return 2
+
+    # Output
+    json.dump(results, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

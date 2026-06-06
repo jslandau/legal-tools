@@ -1,4 +1,6 @@
 """Tests for patent_verify: normalization + blob/index building."""
+import io
+import json
 import pytest
 
 from patent_verify import (
@@ -17,6 +19,8 @@ from patent_verify import (
     resolve,
     verify_emit,
     verify_resolve,
+    process,
+    main,
 )
 
 
@@ -1069,3 +1073,192 @@ class TestVerifyResolve:
         assert result["found_at"] is not None
         assert "match_scope" in result
         assert result["match_scope"] == "window"
+
+
+class TestProcess:
+    """Tests for AC7.1, AC7.2, AC7.3, AC7.4: process() batch handler."""
+
+    def test_ac7_1_echoes_ids_in_order(self, tmp_path, us9_artifact):
+        """process echoes id for every entry in order."""
+        from patent_extract import write_document
+
+        # Write artifact to tmp file
+        artifact_path = tmp_path / "test.json"
+        write_document(us9_artifact, artifact_path)
+
+        entries = [
+            {
+                "id": "entry-1",
+                "mode": "emit",
+                "cite": "5:1",
+                "artifact_path": str(artifact_path),
+            },
+            {
+                "id": "entry-2",
+                "mode": "emit",
+                "cite": "6:1",
+                "artifact_path": str(artifact_path),
+            },
+        ]
+
+        results = process(entries)
+
+        # Check IDs are echoed in order
+        assert len(results) == 2
+        assert results[0]["id"] == "entry-1"
+        assert results[1]["id"] == "entry-2"
+
+    def test_ac7_2_malformed_json(self, capsys, monkeypatch):
+        """main with malformed JSON returns exit code 2."""
+        # Mock stdin with bad JSON
+        bad_json = "{not valid json"
+        monkeypatch.setattr("sys.stdin", io.StringIO(bad_json))
+
+        result = main([])
+
+        assert result == 2
+        _, stderr = capsys.readouterr()
+        assert "ERROR" in stderr
+        assert "valid JSON" in stderr
+
+    def test_ac7_3_non_array_json(self, capsys, monkeypatch):
+        """main with non-array JSON returns exit code 2."""
+        # Mock stdin with object (not array)
+        obj_json = json.dumps({"key": "value"})
+        monkeypatch.setattr("sys.stdin", io.StringIO(obj_json))
+
+        result = main([])
+
+        assert result == 2
+        _, stderr = capsys.readouterr()
+        assert "ERROR" in stderr
+        assert "array" in stderr
+
+    def test_ac7_4_emit_and_resolve_batch(self, tmp_path, us9_artifact):
+        """process with emit, resolve, and error entries returns documented shapes."""
+        from patent_extract import write_document
+
+        # Write artifact
+        artifact_path = tmp_path / "test.json"
+        write_document(us9_artifact, artifact_path)
+
+        entries = [
+            {
+                "id": "emit-1",
+                "mode": "emit",
+                "cite": "5:1",
+                "artifact_path": str(artifact_path),
+            },
+            {
+                "id": "resolve-1",
+                "mode": "resolve",
+                "substring": "element",
+                "within": "5:1-10",
+                "artifact_path": str(artifact_path),
+                "retried": False,
+            },
+            {
+                "id": "missing-artifact",
+                "mode": "emit",
+                "cite": "5:1",
+                "artifact_path": str(tmp_path / "nonexistent.json"),
+            },
+        ]
+
+        results = process(entries)
+
+        assert len(results) == 3
+
+        # Check emit result has documented keys
+        emit_result = results[0]
+        assert emit_result["id"] == "emit-1"
+        assert "cite" in emit_result
+        assert "window_blob" in emit_result
+
+        # Check resolve result has documented keys
+        resolve_result = results[1]
+        assert resolve_result["id"] == "resolve-1"
+        assert "found_at" in resolve_result or "ambiguous_match" in resolve_result
+
+        # Check missing artifact yields error result
+        error_result = results[2]
+        assert error_result["id"] == "missing-artifact"
+        assert error_result.get("status") == "error"
+        assert "error" in error_result
+        assert "no such artifact" in error_result["error"]
+
+
+class TestMain:
+    """Tests for AC7.1, AC7.2, AC7.3: main() CLI shape."""
+
+    def test_main_reads_from_stdin_by_default(self, capsys, monkeypatch, tmp_path, us9_artifact):
+        """main reads from stdin when --input is omitted."""
+        from patent_extract import write_document
+
+        # Write artifact
+        artifact_path = tmp_path / "test.json"
+        write_document(us9_artifact, artifact_path)
+
+        # Mock stdin with valid batch
+        batch = json.dumps(
+            [
+                {
+                    "id": "test-1",
+                    "mode": "emit",
+                    "cite": "5:1",
+                    "artifact_path": str(artifact_path),
+                }
+            ]
+        )
+        monkeypatch.setattr("sys.stdin", io.StringIO(batch))
+
+        result = main([])
+
+        assert result == 0
+        stdout, _ = capsys.readouterr()
+        output = json.loads(stdout)
+        assert isinstance(output, list)
+        assert output[0]["id"] == "test-1"
+
+    def test_main_reads_from_file_with_input_arg(self, capsys, tmp_path, us9_artifact):
+        """main reads from --input file when provided."""
+        from patent_extract import write_document
+
+        # Write artifact
+        artifact_path = tmp_path / "artifact.json"
+        write_document(us9_artifact, artifact_path)
+
+        # Write batch to input file
+        batch_path = tmp_path / "batch.json"
+        batch = [
+            {
+                "id": "test-1",
+                "mode": "emit",
+                "cite": "5:1",
+                "artifact_path": str(artifact_path),
+            }
+        ]
+        batch_path.write_text(json.dumps(batch))
+
+        result = main(["--input", str(batch_path)])
+
+        assert result == 0
+        stdout, _ = capsys.readouterr()
+        output = json.loads(stdout)
+        assert len(output) == 1
+        assert output[0]["id"] == "test-1"
+
+    def test_main_outputs_json_with_trailing_newline(self, capsys, monkeypatch):
+        """main outputs valid JSON array with trailing newline."""
+        batch = json.dumps([])
+        monkeypatch.setattr("sys.stdin", io.StringIO(batch))
+
+        result = main([])
+
+        assert result == 0
+        stdout, _ = capsys.readouterr()
+        # Check trailing newline
+        assert stdout.endswith("\n")
+        # Check valid JSON
+        output = json.loads(stdout)
+        assert isinstance(output, list)
