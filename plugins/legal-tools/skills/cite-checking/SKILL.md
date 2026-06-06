@@ -260,7 +260,7 @@ Output object (within the results array):
 }
 ```
 
-The `window_blob` is a ±10% margin around the cited span (minimum ±1 line per coordinate dimension, clamped to document bounds). The `body_blob` is the full-text body (all text-kind lines normalized). The `ambiguity` flag is set when the grid has insufficient anchor lines to locate the cite (see grid drift below).
+The `window_blob` is a ±10% margin around the cited span (minimum ±1 line at each line endpoint, clamped to document bounds); columns are never widened. The `body_blob` is the full-text body (all text-kind lines normalized). The `ambiguity` flag is set when the grid has insufficient anchor lines to locate the cite (see grid drift below).
 
 2. **Tier 1 — window match.** The LLM matches the brief's quote against `window_blob`. Tolerate whitespace/case/punctuation drift and obvious OCR quirks; do **not** accept a paraphrase or a dropped substantive word (a near-miss falls through — no soft-pass). On a hit, hand the matched **verbatim slice** (as it appears in `window_blob`) to a `mode:"resolve"` entry:
 
@@ -275,7 +275,7 @@ The `window_blob` is a ±10% margin around the cited span (minimum ±1 line per 
 }
 ```
 
-Output on a unique window hit:
+The resolve() call automatically searches the window first; if no match is found there, it searches the full body in a single call. Output on a unique window hit:
 ```json
 {
   "id": "cite-0001",
@@ -284,15 +284,24 @@ Output on a unique window hit:
 }
 ```
 
-Record `match_tier_used: 1` on the `pincite` entry.
+Record `match_tier_used: 1` on the `pincite` entry. If the returned `match_scope` is `"window"`, the quote was located in the ±10% search window around the cited coordinates (Tier 1).
 
-3. **Tier 2 — body match.** On a window miss (resolve returns `found_at: null`), match the quote against `body_blob` using the same resolve entry but with `within` covering the body bounds → `found_at` and `match_scope: "body"`. The cite is materially off (quote is elsewhere in the patent). Record `match_tier_used: 2`.
+3. **Tier 2 — body match.** When resolve() searches the body as a fallback (window contained zero hits), it returns:
+```json
+{
+  "id": "cite-0001",
+  "found_at": "7:23",
+  "match_scope": "body"
+}
+```
 
-4. **Resolver ambiguity.** If resolve returns `ambiguous_match` with a `retry` instruction (multiple matches found and not yet retried), re-call with a longer/more distinctive slice and `retried: true`. If still ambiguous (`ambiguous_match: true` with `retried: true`), all candidate coordinates are returned in `found_at` (a list of coordinate strings). Disambiguate using the brief's surrounding context (other pincites, patent abstract, claim text) to select the intended location.
+This indicates a unique match in the body outside the window — the quote exists but the cite is materially off (quote is elsewhere in the patent). Record `match_tier_used: 2`.
+
+4. **Resolver ambiguity.** If resolve returns `ambiguous_match` with a `retry` instruction (multiple matches found and not yet retried), re-call with a longer/more distinctive slice and `retried: true`. If still ambiguous (`ambiguous_match: true` with `retried: true`), all candidate coordinates are returned in `found_at` (a list of coordinate strings). Disambiguate using the brief's surrounding context (other pincites, patent abstract, claim text) to select the intended location. Note: ambiguity is a separate orthogonal axis from Tier 1/2 (window vs body) — a retry is for handling duplicate matches in the chosen scope, not for escalating to body.
 
 5. **Grid drift.** If emit returned `ambiguity: true`, the citation grid has spurious/unknown lines near the cited region. Annotate the entry: "grid/line-count drift near cited region — expanded window included." The expanded window widened the search automatically; if a match was found, it is still valid (though the actual location may differ from the cite).
 
-6. **No hit anywhere.** Quote not located at or near the cite — surface to the user: possible misquote, wrong column:line, or wrong patent. Record `quote_match: false`.
+6. **No hit anywhere.** When resolve returns `found_at: null`, the quote was not located in either the window or the body — surface to the user: possible misquote, wrong column:line, or wrong patent. Record `quote_match: false`.
 
 **Recording on the `pincite` entry** (reuse the existing schema; add patent extras):
 
@@ -312,11 +321,13 @@ Record `match_tier_used: 1` on the `pincite` entry.
 
 **Outcome mapping for Stage 6:**
 
-- `found_at == cited_coord` → **verified** (quote located where the brief says).
-- `found_at != cited_coord` → **verified but cite-defective** (quote found; the offset is the finding. Stage 6 notes "pincite coordinate error").
-- `quote_match: false` → **red flag** (no quote located). Stage 6 marks `support: Unable` with issue `wrong-pincite`.
+- Quote located at the cited coordinate (compare the resolved coordinate from `found_at` semantically against the cited span in `cited_coord`; note that `found_at` is a string like `"5:12"` while `cited_coord` is a list like `[5,10,6,3]`) → **verified** (quote located where the brief says).
+- Quote located but at a different coordinate → **verified but cite-defective** (quote found; the offset is the finding. Stage 6 notes "pincite coordinate error").
+- `found_at: null` (resolved as `quote_match: false`) → **red flag** (no quote located). Stage 6 marks `support: Unable` with issue `wrong-pincite`.
 
 Stage 6's existing `support` labelling consumes `quote_match` exactly as it does for cases — `true` signals a strong match, `false` signals a mismatch or no-hit, and `match_tier_used` informs the confidence tier.
+
+**Batch error handling.** The patent_verify.py batch command processes each entry independently. If an entry encounters an error (missing artifact, malformed JSON, invalid cite), it returns `{id, status:"error", error:...}` with an error message. The batch continues processing remaining entries; only malformed top-level JSON input causes the entire process to exit with code 2. Per-entry errors do not abort the batch.
 
 **Cross-reference.** This ladder is the patent counterpart to the case-law **match ladder for pincite extraction** (citation-toolkit/SKILL.md), adapted for column:line coordinates. Unlike case-law (where pagination modes vary), patents have an exact coordinate system once the artifact is built — the challenge is that the human-entered cite often contains offsets (grid drift, line-count shifts).
 
