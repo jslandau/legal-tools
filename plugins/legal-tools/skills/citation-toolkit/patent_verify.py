@@ -845,7 +845,9 @@ def process(entries: list[dict]) -> list[dict]:
                 )
             else:
                 result = {"status": "error", "error": f"unknown mode: {mode!r}"}
-        except (CiteError, KeyError) as e:
+        except KeyError as e:
+            result = {"status": "error", "error": f"missing required field: {e}"}
+        except CiteError as e:
             result = {"status": "error", "error": str(e)}
 
         # Append result with id
@@ -875,11 +877,11 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     # Read input
-    payload = (
-        open(args.input, encoding="utf-8").read()
-        if args.input
-        else sys.stdin.read()
-    )
+    if args.input:
+        with open(args.input, encoding="utf-8") as f:
+            payload = f.read()
+    else:
+        payload = sys.stdin.read()
 
     # Parse JSON
     try:

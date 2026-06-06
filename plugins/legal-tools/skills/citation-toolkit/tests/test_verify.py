@@ -1187,6 +1187,53 @@ class TestProcess:
         assert "error" in error_result
         assert "no such artifact" in error_result["error"]
 
+    def test_unknown_mode_yields_error_result(self, tmp_path, us9_artifact):
+        """An unrecognized mode becomes an error result, batch survives."""
+        from patent_extract import write_document
+
+        artifact_path = tmp_path / "test.json"
+        write_document(us9_artifact, artifact_path)
+
+        results = process(
+            [{"id": "bad-mode", "mode": "frobnicate", "artifact_path": str(artifact_path)}]
+        )
+
+        assert len(results) == 1
+        assert results[0]["id"] == "bad-mode"
+        assert results[0]["status"] == "error"
+        assert "unknown mode" in results[0]["error"]
+        assert "frobnicate" in results[0]["error"]
+
+    def test_bad_json_artifact_yields_error_result(self, tmp_path):
+        """An artifact file that is not valid JSON becomes an error result."""
+        artifact_path = tmp_path / "corrupt.json"
+        artifact_path.write_text("{ this is not valid json", encoding="utf-8")
+
+        results = process(
+            [{"id": "corrupt", "mode": "emit", "cite": "5:1", "artifact_path": str(artifact_path)}]
+        )
+
+        assert len(results) == 1
+        assert results[0]["id"] == "corrupt"
+        assert results[0]["status"] == "error"
+        assert "failed to load artifact" in results[0]["error"]
+
+    def test_missing_required_field_yields_error_result(self, tmp_path, us9_artifact):
+        """An emit entry missing 'cite' becomes an error result, not a crash."""
+        from patent_extract import write_document
+
+        artifact_path = tmp_path / "test.json"
+        write_document(us9_artifact, artifact_path)
+
+        results = process(
+            [{"id": "no-cite", "mode": "emit", "artifact_path": str(artifact_path)}]
+        )
+
+        assert len(results) == 1
+        assert results[0]["id"] == "no-cite"
+        assert results[0]["status"] == "error"
+        assert "missing required field" in results[0]["error"]
+
 
 class TestMain:
     """Tests for AC7.1, AC7.2, AC7.3: main() CLI shape."""
