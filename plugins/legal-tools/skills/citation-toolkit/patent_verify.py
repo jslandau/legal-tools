@@ -314,6 +314,39 @@ def resolve_span(
     return (start_col, start_line, end_col, end_line)
 
 
+# PHASE 4: QUOTE-LOCATION RESOLUTION WITH DUPLICATE HANDLING
+
+
+def _find_all(blob: str, needle: str) -> list[int]:
+    """Find all non-overlapping start offsets of needle in blob.
+
+    AC6.6: Returns a list of all non-overlapping start offsets of the needle
+    in the blob. If needle is empty, returns empty list (defends against
+    infinite loop). Matches are non-overlapping: after each match, the search
+    continues from the position after the matched text.
+
+    Args:
+        blob: The text to search in.
+        needle: The substring to search for (may be empty).
+
+    Returns:
+        List of start offsets of non-overlapping matches, or empty if none found.
+    """
+    if not needle:  # Empty needle: return empty list
+        return []
+
+    hits = []
+    pos = 0
+    while True:
+        i = blob.find(needle, pos)
+        if i == -1:
+            break
+        hits.append(i)
+        pos = i + len(needle)  # Non-overlapping: continue after this match
+
+    return hits
+
+
 # PHASE 3: WINDOW COMPUTATION AND AMBIGUITY EXPANSION
 
 

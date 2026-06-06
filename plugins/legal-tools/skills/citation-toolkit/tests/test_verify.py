@@ -13,6 +13,7 @@ from patent_verify import (
     expanded_bounds,
     _lines_in_bounds,
     gather_window,
+    _find_all,
 )
 
 
@@ -769,3 +770,67 @@ class TestGatherWindow:
         assert result["ambiguity"] is True, "gather_window must detect ambiguity (probes CITED span, not window)"
         assert result["ambiguity_reason"] is not None
         assert len(result["ambiguity_reason"]) > 0
+
+
+class TestFindAll:
+    """Tests for AC6.6: _find_all non-overlapping substring discovery."""
+
+    def test_single_occurrence(self):
+        """Single needle in blob returns offset list with one entry."""
+        blob = "the quick brown fox"
+        needle = "quick"
+        result = _find_all(blob, needle)
+        assert result == [4]
+
+    def test_multiple_non_overlapping_occurrences(self):
+        """Multiple occurrences of needle are returned as separate offsets."""
+        blob = "a foo bar foo baz"
+        needle = "foo"
+        result = _find_all(blob, needle)
+        # "foo" appears at offset 2 and offset 10 (non-overlapping)
+        assert result == [2, 10]
+
+    def test_overlapping_occurrences_skipped(self):
+        """Overlapping matches are skipped (non-overlapping only)."""
+        blob = "aaa"
+        needle = "aa"
+        result = _find_all(blob, needle)
+        # First match at 0, next search starts at 0 + len("aa") = 2
+        # Match at 2 would end at 4 (out of bounds), so only [0]
+        assert result == [0]
+
+    def test_no_occurrence(self):
+        """Needle not in blob returns empty list."""
+        blob = "hello world"
+        needle = "xyz"
+        result = _find_all(blob, needle)
+        assert result == []
+
+    def test_empty_blob(self):
+        """Empty blob returns empty list."""
+        blob = ""
+        needle = "foo"
+        result = _find_all(blob, needle)
+        assert result == []
+
+    def test_empty_needle(self):
+        """Empty needle should return empty list (no-op, defend against infinite loop)."""
+        blob = "hello world"
+        needle = ""
+        result = _find_all(blob, needle)
+        assert result == []
+
+    def test_needle_equals_blob(self):
+        """Needle exactly equals blob: single match at offset 0."""
+        blob = "exact match"
+        needle = "exact match"
+        result = _find_all(blob, needle)
+        assert result == [0]
+
+    def test_case_sensitive(self):
+        """Needle matching is case-sensitive."""
+        blob = "Hello HELLO hello"
+        needle = "hello"
+        result = _find_all(blob, needle)
+        # Only the lowercase "hello" matches
+        assert result == [12]
