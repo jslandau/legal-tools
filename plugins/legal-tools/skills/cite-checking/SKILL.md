@@ -222,6 +222,104 @@ When pagination_mode is `"slip_only"` or `"none"` (from the upfront check in Sta
 
 Extract enough context to understand the proposition being stated (typically 100–300 words surrounding the matched passage).
 
+### Patents (column:line quote verification)
+
+Patent pincites use column:line coordinates (e.g., `5:10-6:3`) rather than page numbers. The brief contains a quote from the patent, and verification means locating that exact passage in the artifact's normalized text grid.
+
+**Precondition.** Stage 4 Phase B returned `status: ok`, `kind: grant`, and the artifact has been built via `patent_extract.py build`. The brief carries a quoted passage and a `column:line` pincite (from Stage 4).
+
+**The ladder** (LLM-executed; deterministic emit/resolve via `patent_verify.py` batch entries):
+
+1. **Emit candidates.** Call `patent_verify.py` with a `mode:"emit"` entry to normalize the citation and gather the search window:
+
+```bash
+python3 plugins/legal-tools/skills/citation-toolkit/patent_verify.py --input -
+```
+
+Input JSON array entry:
+```json
+{
+  "id": "cite-0001",
+  "mode": "emit",
+  "artifact_path": "/path/to/US9154231.json",
+  "cite": "5:10-6:3"
+}
+```
+
+Output object (within the results array):
+```json
+{
+  "id": "cite-0001",
+  "cite": "5:10-6:3",
+  "cited_coord": [5, 10, 6, 3],
+  "window_coord_range": [5, 9, 6, 4],
+  "window_blob": "normalized text from window (newline-free)",
+  "body_blob": "normalized text of full body (newline-free)",
+  "ambiguity": false,
+  "ambiguity_reason": null
+}
+```
+
+The `window_blob` is a ±10% margin around the cited span (minimum ±1 line per coordinate dimension, clamped to document bounds). The `body_blob` is the full-text body (all text-kind lines normalized). The `ambiguity` flag is set when the grid has insufficient anchor lines to locate the cite (see grid drift below).
+
+2. **Tier 1 — window match.** The LLM matches the brief's quote against `window_blob`. Tolerate whitespace/case/punctuation drift and obvious OCR quirks; do **not** accept a paraphrase or a dropped substantive word (a near-miss falls through — no soft-pass). On a hit, hand the matched **verbatim slice** (as it appears in `window_blob`) to a `mode:"resolve"` entry:
+
+```json
+{
+  "id": "cite-0001",
+  "mode": "resolve",
+  "artifact_path": "/path/to/US9154231.json",
+  "substring": "verbatim slice as matched in window_blob",
+  "within": "5:9-6:4",
+  "retried": false
+}
+```
+
+Output on a unique window hit:
+```json
+{
+  "id": "cite-0001",
+  "found_at": "5:12",
+  "match_scope": "window"
+}
+```
+
+Record `match_tier_used: 1` on the `pincite` entry.
+
+3. **Tier 2 — body match.** On a window miss (resolve returns `found_at: null`), match the quote against `body_blob` using the same resolve entry but with `within` covering the body bounds → `found_at` and `match_scope: "body"`. The cite is materially off (quote is elsewhere in the patent). Record `match_tier_used: 2`.
+
+4. **Resolver ambiguity.** If resolve returns `ambiguous_match` with a `retry` instruction (multiple matches found and not yet retried), re-call with a longer/more distinctive slice and `retried: true`. If still ambiguous (`ambiguous_match: true` with `retried: true`), all candidate coordinates are returned in `found_at` (a list of coordinate strings). Disambiguate using the brief's surrounding context (other pincites, patent abstract, claim text) to select the intended location.
+
+5. **Grid drift.** If emit returned `ambiguity: true`, the citation grid has spurious/unknown lines near the cited region. Annotate the entry: "grid/line-count drift near cited region — expanded window included." The expanded window widened the search automatically; if a match was found, it is still valid (though the actual location may differ from the cite).
+
+6. **No hit anywhere.** Quote not located at or near the cite — surface to the user: possible misquote, wrong column:line, or wrong patent. Record `quote_match: false`.
+
+**Recording on the `pincite` entry** (reuse the existing schema; add patent extras):
+
+```json
+{
+  "text": "passage extracted from the source (window or body)",
+  "match_tier_used": 1,
+  "brief_quote": "the brief's quoted language",
+  "actual_text": "the resolved patent text (verbatim slice from window_blob or body_blob)",
+  "quote_match": true,
+  "match_phrase": "the substring of actual_text that constitutes the verbatim match",
+  "cited_coord": [5, 10, 6, 3],
+  "found_at": "5:12",
+  "ambiguity": false
+}
+```
+
+**Outcome mapping for Stage 6:**
+
+- `found_at == cited_coord` → **verified** (quote located where the brief says).
+- `found_at != cited_coord` → **verified but cite-defective** (quote found; the offset is the finding. Stage 6 notes "pincite coordinate error").
+- `quote_match: false` → **red flag** (no quote located). Stage 6 marks `support: Unable` with issue `wrong-pincite`.
+
+Stage 6's existing `support` labelling consumes `quote_match` exactly as it does for cases — `true` signals a strong match, `false` signals a mismatch or no-hit, and `match_tier_used` informs the confidence tier.
+
+**Cross-reference.** This ladder is the patent counterpart to the case-law **match ladder for pincite extraction** (citation-toolkit/SKILL.md), adapted for column:line coordinates. Unlike case-law (where pagination modes vary), patents have an exact coordinate system once the artifact is built — the challenge is that the human-entered cite often contains offsets (grid drift, line-count shifts).
+
 ### Other source types
 
 - **Statutes and regulations (U.S.C., C.F.R.):** The pincite is already extracted in Stage 4 by `lii_fetcher.py`. Use `subsection_text` when present; fall back to `section_text` when no subsection was cited or when `anchor_matched` is false. **There is no match ladder for statutes and regulations** — the subsection anchor is the locator, or it isn't. Skip `match_tier_used` on these entries (emit `null` in the JSON). When `status == "anchor_not_found"`, prefer asking the user to point at the cited subsection over silently scanning the full-section text for a paraphrase.
