@@ -327,7 +327,7 @@ This indicates a unique match in the body outside the window — the quote exist
 
 Stage 6's existing `support` labelling consumes `quote_match` exactly as it does for cases — `true` signals a strong match, `false` signals a mismatch or no-hit, and `match_tier_used` informs the confidence tier.
 
-**Batch error handling.** The patent_verify.py batch command processes each entry independently. If an entry encounters an error (missing artifact, malformed JSON, invalid cite), it returns `{id, status:"error", error:...}` with an error message. The batch continues processing remaining entries; only malformed top-level JSON input causes the entire process to exit with code 2. Per-entry errors do not abort the batch.
+**Batch error handling.** The patent_verify.py batch command processes each entry independently. If an entry encounters an error (missing artifact, malformed/unreadable artifact file, invalid cite), it returns `{id, status:"error", error:...}` with an error message. The batch continues processing remaining entries; only malformed top-level JSON input causes the entire process to exit with code 2. Per-entry errors do not abort the batch.
 
 **Cross-reference.** This ladder is the patent counterpart to the case-law **match ladder for pincite extraction** (citation-toolkit/SKILL.md), adapted for column:line coordinates. Unlike case-law (where pagination modes vary), patents have an exact coordinate system once the artifact is built — the challenge is that the human-entered cite often contains offsets (grid drift, line-count shifts).
 
