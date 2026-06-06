@@ -14,6 +14,7 @@ from patent_verify import (
     _lines_in_bounds,
     gather_window,
     _find_all,
+    resolve,
 )
 
 
@@ -834,3 +835,155 @@ class TestFindAll:
         result = _find_all(blob, needle)
         # Only the lowercase "hello" matches
         assert result == [12]
+
+
+class TestResolveWithWhitespaceGuard:
+    """Tests for AC6 resolver with whitespace-only re-normalize guard (Task 2)."""
+
+    def test_ac6_1_unique_window_match(self):
+        """AC6.1: Unique substring in window resolves to single coordinate."""
+        # Build a simple window blob
+        window_lines = [
+            {"column": 1, "line": 1, "text": "a widget that operates", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+            {"column": 1, "line": 2, "text": "in parallel", "bbox": (0, 10, 10, 20), "page_index": 0, "kind": "text"},
+        ]
+        window_blob, window_index = build_blob_and_index(window_lines)
+
+        # Empty body (no body fallback needed)
+        body_blob = ""
+        body_index = []
+
+        # Search for a unique substring in the window
+        result = resolve(window_blob, window_index, body_blob, body_index, "widget that")
+
+        # Should resolve to a single coordinate
+        assert result["found_at"] is not None
+        assert result["match_scope"] == "window"
+        assert "ambiguous_match" not in result or result.get("ambiguous_match") is False
+
+    def test_ac6_6_whitespace_slip_resolves(self):
+        """AC6.6: Whitespace slip (double-space, leading/trailing) still resolves via re-normalize."""
+        window_lines = [
+            {"column": 1, "line": 1, "text": "a widget that operates", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+        ]
+        window_blob, window_index = build_blob_and_index(window_lines)
+
+        body_blob = ""
+        body_index = []
+
+        # Search with double-space: "a  widget that"
+        # normalize_line("a  widget that") -> "a widget that" (whitespace collapsed)
+        # Should match "a widget that" in the blob
+        result = resolve(window_blob, window_index, body_blob, body_index, "a  widget that")
+
+        assert result["found_at"] is not None
+        assert result["match_scope"] == "window"
+
+    def test_ac6_6_case_exact_no_fold(self):
+        """AC6.6: Case is NOT folded; case-only difference does NOT resolve."""
+        window_lines = [
+            {"column": 1, "line": 1, "text": "a widget that", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+        ]
+        window_blob, window_index = build_blob_and_index(window_lines)
+
+        body_blob = ""
+        body_index = []
+
+        # Search with different case: "a Widget"
+        # normalize_line("a Widget") -> "a Widget" (case preserved)
+        # Should NOT match "a widget" (case mismatch)
+        result = resolve(window_blob, window_index, body_blob, body_index, "a Widget")
+
+        assert result["found_at"] is None
+
+    def test_empty_substring_after_normalization(self):
+        """Empty or whitespace-only substring after normalize returns no match."""
+        window_lines = [
+            {"column": 1, "line": 1, "text": "hello world", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+        ]
+        window_blob, window_index = build_blob_and_index(window_lines)
+
+        body_blob = ""
+        body_index = []
+
+        # Whitespace-only substring normalizes to empty
+        result = resolve(window_blob, window_index, body_blob, body_index, "   \t  ")
+
+        assert result["found_at"] is None
+
+    def test_ac6_4_window_hit_preferred(self):
+        """AC6.4: Substring unique in window is resolved to window even if duplicated in body."""
+        window_lines = [
+            {"column": 1, "line": 1, "text": "unique phrase here", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+        ]
+        window_blob, window_index = build_blob_and_index(window_lines)
+
+        # Body contains the substring twice (ambiguous in body)
+        body_lines = [
+            {"column": 2, "line": 1, "text": "unique phrase there", "bbox": (20, 0, 30, 10), "page_index": 0, "kind": "text"},
+            {"column": 2, "line": 2, "text": "unique phrase also", "bbox": (20, 10, 30, 20), "page_index": 0, "kind": "text"},
+        ]
+        body_blob, body_index = build_blob_and_index(body_lines)
+
+        # Search for "unique phrase"
+        result = resolve(window_blob, window_index, body_blob, body_index, "unique phrase")
+
+        # Should resolve to window hit (unique there), ignoring body duplicates
+        assert result["found_at"] is not None
+        assert result["match_scope"] == "window"
+
+    def test_ac6_5_window_miss_body_fallback(self):
+        """AC6.5: Substring absent from window, unique in body -> resolves to body."""
+        window_lines = [
+            {"column": 1, "line": 1, "text": "window content here", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+        ]
+        window_blob, window_index = build_blob_and_index(window_lines)
+
+        body_lines = [
+            {"column": 2, "line": 1, "text": "body content here", "bbox": (20, 0, 30, 10), "page_index": 0, "kind": "text"},
+        ]
+        body_blob, body_index = build_blob_and_index(body_lines)
+
+        # Search for "body content" (not in window, unique in body)
+        result = resolve(window_blob, window_index, body_blob, body_index, "body content")
+
+        # Should resolve to body hit
+        assert result["found_at"] is not None
+        assert result["match_scope"] == "body"
+
+    def test_ac6_2_ambiguous_match_retry_false(self):
+        """AC6.2: Multiple window hits with retried=False -> ambiguous_match with retry instruction."""
+        window_lines = [
+            {"column": 1, "line": 1, "text": "the the quick the", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+        ]
+        window_blob, window_index = build_blob_and_index(window_lines)
+
+        body_blob = ""
+        body_index = []
+
+        # Search for "the" (appears multiple times in window)
+        result = resolve(window_blob, window_index, body_blob, body_index, "the", retried=False)
+
+        # Should return ambiguous_match with retry instruction, no found_at
+        assert result.get("ambiguous_match") is True
+        assert "retry" in result
+        assert "found_at" not in result or result.get("found_at") is None
+
+    def test_ac6_3_ambiguous_match_retry_true(self):
+        """AC6.3: Multiple hits with retried=True -> ambiguous_match with list of found_at."""
+        window_lines = [
+            {"column": 1, "line": 1, "text": "the the quick the", "bbox": (0, 0, 10, 10), "page_index": 0, "kind": "text"},
+        ]
+        window_blob, window_index = build_blob_and_index(window_lines)
+
+        body_blob = ""
+        body_index = []
+
+        # Search for "the" with retried=True
+        result = resolve(window_blob, window_index, body_blob, body_index, "the", retried=True)
+
+        # Should return ambiguous_match with list of found_at
+        assert result.get("ambiguous_match") is True
+        assert "found_at" in result
+        assert isinstance(result["found_at"], list)
+        assert len(result["found_at"]) > 0

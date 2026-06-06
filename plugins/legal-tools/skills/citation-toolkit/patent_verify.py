@@ -347,6 +347,124 @@ def _find_all(blob: str, needle: str) -> list[int]:
     return hits
 
 
+def _fmt(span: tuple[int, int, int, int]) -> str:
+    """Format a coordinate span as a string.
+
+    Renders a (start_col, start_line, end_col, end_line) tuple. If it's a
+    single line (start_col == end_col and start_line == end_line), renders as
+    "c:l". Otherwise renders as "sc:sl-ec:el".
+
+    Args:
+        span: Tuple of (start_col, start_line, end_col, end_line).
+
+    Returns:
+        Formatted string representation.
+    """
+    start_col, start_line, end_col, end_line = span
+    if start_col == end_col and start_line == end_line:
+        return f"{start_col}:{start_line}"
+    return f"{start_col}:{start_line}-{end_col}:{end_line}"
+
+
+def resolve(
+    window_blob: str,
+    window_index: list[tuple[int, int, int]],
+    body_blob: str,
+    body_index: list[tuple[int, int, int]],
+    substring: str,
+    retried: bool = False,
+) -> dict:
+    """Resolve an LLM-supplied substring to a coordinate via duplicate ladder.
+
+    AC6: Implements a four-step ladder:
+    1. Normalize the substring via normalize_line (whitespace collapse, case preserved).
+       If normalization yields empty string, return no match.
+    2. Search window blob. If exactly one hit, return the coordinate.
+    3. If window has no hits, search body blob.
+       - Exactly one hit: return the coordinate (body scope).
+       - No hits: return no match.
+       - Multiple hits: fall through to step 4.
+    4. Multiple hits in either scope:
+       - If not retried: return ambiguous_match with retry instruction (no found_at).
+       - If retried: return ambiguous_match with list of all matched coordinates.
+
+    Args:
+        window_blob: Normalized blob text of the window scope.
+        window_index: Index for window blob (list of (char_offset, column, line)).
+        body_blob: Normalized blob text of the body scope.
+        body_index: Index for body blob (list of (char_offset, column, line)).
+        substring: The LLM-supplied substring to resolve.
+        retried: Flag indicating this is a retry attempt (LLM extended the anchor).
+
+    Returns:
+        Dictionary with keys:
+        - "found_at": Coordinate string (e.g., "6:59" or "6:59-7:3"), or list of
+          coordinate strings if ambiguous_match with retried=True. None if not found.
+        - "match_scope": "window" or "body" (only present if found_at is set).
+        - "ambiguous_match": True if multiple hits (only if ambiguous).
+        - "hits": Count of ambiguous hits (only if ambiguous).
+        - "retry": Instruction string (only if ambiguous and not retried).
+    """
+    # Step 1: Normalize substring
+    needle = normalize_line(substring)
+
+    if not needle:
+        return {"found_at": None}
+
+    # Step 2: Search window
+    window_hits = _find_all(window_blob, needle)
+
+    if len(window_hits) == 1:
+        # Unique in window: resolve and return
+        span = resolve_span(window_index, window_hits[0], window_hits[0] + len(needle))
+        return {
+            "found_at": _fmt(span),
+            "match_scope": "window",
+        }
+
+    # Step 3: If window has no hits, search body
+    if len(window_hits) == 0:
+        body_hits = _find_all(body_blob, needle)
+
+        if len(body_hits) == 1:
+            # Unique in body: resolve and return
+            span = resolve_span(body_index, body_hits[0], body_hits[0] + len(needle))
+            return {
+                "found_at": _fmt(span),
+                "match_scope": "body",
+            }
+
+        if len(body_hits) == 0:
+            # No match anywhere
+            return {"found_at": None}
+
+        # Multiple hits in body: fall through to step 4 with body scope
+        hits_to_resolve = body_hits
+        index_to_use = body_index
+    else:
+        # Multiple hits in window: fall through to step 4 with window scope
+        hits_to_resolve = window_hits
+        index_to_use = window_index
+
+    # Step 4: Multiple hits in chosen scope
+    if not retried:
+        return {
+            "ambiguous_match": True,
+            "hits": len(hits_to_resolve),
+            "retry": "pass a longer/more distinctive substring",
+        }
+    else:
+        # Retried: return all hits as list of coordinate strings
+        found_at_list = [
+            _fmt(resolve_span(index_to_use, hit, hit + len(needle)))
+            for hit in hits_to_resolve
+        ]
+        return {
+            "ambiguous_match": True,
+            "found_at": found_at_list,
+        }
+
+
 # PHASE 3: WINDOW COMPUTATION AND AMBIGUITY EXPANSION
 
 
