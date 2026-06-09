@@ -231,6 +231,8 @@ def _attach_nickname(text: str, citation: PatentCitation) -> None:
     """If a nickname parenthetical sits within NICKNAME_MAX_GAP of the
     citation's end, record it (mutates citation in place)."""
     end = citation["span"][1]
+    # Window extends +60 chars to allow full nickname label parsing (max ~14 chars for
+    # "the [CapitalizedName]" or "the '[3digits]"), plus NICKNAME_MAX_GAP tolerance.
     window = text[end:end + NICKNAME_MAX_GAP + 60]
     m = NICKNAME_RE.match(window.lstrip()) if window else None
     # Only accept if the parenthetical starts within the gap.
@@ -239,6 +241,19 @@ def _attach_nickname(text: str, citation: PatentCitation) -> None:
         label = m.group("label")
         noun = m.group("noun").lower()
         citation["nickname"] = f"the {label} {noun}"
+
+
+def _record_nickname(text: str, citation: PatentCitation, nickname_spans: list) -> None:
+    """Attach nickname to citation and record its span if found.
+
+    Eliminates duplicated bookkeeping between us_long and apppub branches.
+    """
+    _attach_nickname(text, citation)
+    if citation["nickname"] is not None:
+        end = citation["span"][1]
+        nick_m = NICKNAME_RE.search(text, end, end + NICKNAME_MAX_GAP + 60)
+        if nick_m:
+            nickname_spans.append((nick_m.start(), nick_m.end()))
 
 
 def get_patent_citations(text: str) -> list[PatentCitation]:
@@ -262,20 +277,12 @@ def get_patent_citations(text: str) -> list[PatentCitation]:
                 cit = _make_citation("patent", matched, (start, end), ref)
                 citations.append(cit)
             if citations and citations[-1]["span"] == [start, end]:
-                _attach_nickname(text, citations[-1])
-                if citations[-1]["nickname"] is not None:
-                    nick_m = NICKNAME_RE.search(text, end, end + NICKNAME_MAX_GAP + 60)
-                    if nick_m:
-                        nickname_spans.append((nick_m.start(), nick_m.end()))
+                _record_nickname(text, citations[-1], nickname_spans)
         elif family == "apppub":
             ref = dict(parse_patent_ref(m.group("number")))
             cit = _make_citation("patent", matched, (start, end), ref)
             citations.append(cit)
-            _attach_nickname(text, cit)
-            if cit["nickname"] is not None:
-                nick_m = NICKNAME_RE.search(text, end, end + NICKNAME_MAX_GAP + 60)
-                if nick_m:
-                    nickname_spans.append((nick_m.start(), nick_m.end()))
+            _record_nickname(text, cit, nickname_spans)
         elif family in ("ep", "wo", "pct"):
             ref = dict(parse_patent_ref(matched))
             citations.append(_make_citation("patent", matched, (start, end), ref))
