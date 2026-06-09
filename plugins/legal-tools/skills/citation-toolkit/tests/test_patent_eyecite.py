@@ -279,3 +279,61 @@ class TestMergeAndOrder:
     def test_plain_prose_has_no_citations(self):
         """Ordinary prose with numbers and ratios yields nothing."""
         assert _cites("The ratio was 4:1 in 2009, per section 8.") == []
+
+
+class TestCli:
+    """main(argv): --input/stdin in, JSON array out (eyecite_extract shape)."""
+
+    def test_main_reads_stdin_emits_json(self, capsys, monkeypatch):
+        """Default invocation reads raw text on stdin, prints a JSON array."""
+        import io
+        import json
+        from patent_eyecite import main
+
+        monkeypatch.setattr(
+            "sys.stdin", io.StringIO("See U.S. Patent No. 8,453,642.")
+        )
+        result = main([])
+
+        assert result == 0
+        out = json.loads(capsys.readouterr().out)
+        assert isinstance(out, list)
+        assert out[0]["citation_type"] == "patent"
+        assert out[0]["ref"]["canonical_number"] == "8453642"
+
+    def test_main_reads_input_file(self, capsys, tmp_path):
+        """--input reads text from a file path."""
+        import json
+        from patent_eyecite import main
+
+        f = tmp_path / "brief.txt"
+        f.write_text("the '642 patent controls.", encoding="utf-8")
+
+        result = main(["--input", str(f)])
+
+        assert result == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out[0]["citation_type"] == "patent_short"
+
+    def test_main_missing_input_file_exits_2(self, capsys):
+        """A nonexistent --input path is a usage error: exit 2, message on stderr."""
+        from patent_eyecite import main
+
+        result = main(["--input", "/nonexistent/path.txt"])
+
+        assert result == 2
+        assert "ERROR" in capsys.readouterr().err
+
+    def test_spans_index_original_text(self, capsys, monkeypatch):
+        """Emitted spans slice the ORIGINAL (uncleaned) text correctly."""
+        import io
+        import json
+        from patent_eyecite import main
+
+        original = "the '642 patent controls."
+        monkeypatch.setattr("sys.stdin", io.StringIO(original))
+        main([])
+
+        out = json.loads(capsys.readouterr().out)
+        start, end = out[0]["span"]
+        assert original[start:end] == "the '642 patent"

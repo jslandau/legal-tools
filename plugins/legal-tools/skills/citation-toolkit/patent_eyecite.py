@@ -295,9 +295,39 @@ def get_patent_citations(text: str) -> list[PatentCitation]:
     return [c for c in citations if not _inside_nickname(c)]
 
 
+# ---------------------------------------------------------------------------
+# Imperative Shell — CLI
+# ---------------------------------------------------------------------------
+
 def main(argv: list[str]) -> int:
-    """CLI shell — wired fully in a later task of this phase."""
-    raise NotImplementedError
+    """Read raw document text from --input or stdin; print a JSON array of
+    PatentCitation entries to stdout.
+
+    Returns 0 on success, 2 on input errors (unreadable --input file).
+    """
+    parser = argparse.ArgumentParser(
+        description="Extract patent citations from document text. "
+                    "Reads raw text; writes a JSON array of citations to stdout.",
+    )
+    parser.add_argument("--input", help="Path to input text file. If omitted, read stdin.")
+    args = parser.parse_args(argv)
+
+    if args.input:
+        try:
+            with open(args.input, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError as e:
+            sys.stderr.write(f"ERROR: failed to read input file: {e}\n")
+            return 2
+    else:
+        text = sys.stdin.read()
+
+    cleaned = clean_patent_text(text)
+    citations = get_patent_citations(cleaned)
+
+    json.dump(citations, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 0
 
 
 if __name__ == "__main__":
