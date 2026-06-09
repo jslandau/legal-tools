@@ -800,3 +800,145 @@ class TestMainCLI:
         assert "  " in captured.out
         # Should end with newline
         assert captured.out.endswith("\n")
+
+
+class TestEpDocuments:
+    """Tests for European Patent (EP) document parsing — new kind 'ep'."""
+
+    def test_ep_compact_seven_digits(self):
+        """EP1234567 parses as kind=ep, canonical EP1234567, not fetchable."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("EP1234567")
+
+        assert result["kind"] == "ep"
+        assert result["canonical_number"] == "EP1234567"
+        assert result["display"] == "European Patent No. EP 1 234 567"
+        assert result["fetchable"] is False
+        assert result["reason"] == "non-US lookup not yet supported"
+
+    def test_ep_spaced_form(self):
+        """'EP 1 234 567' (EPO display spacing) parses identically to compact."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("EP 1 234 567")
+
+        assert result["kind"] == "ep"
+        assert result["canonical_number"] == "EP1234567"
+
+    def test_ep_with_kind_code(self):
+        """'EP 1234567 B1' strips the kind code as noise."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("EP 1234567 B1")
+
+        assert result["kind"] == "ep"
+        assert result["canonical_number"] == "EP1234567"
+
+    def test_ep_lowercase_input(self):
+        """Lowercase 'ep 1234567' still parses (normalization uppercases)."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("ep 1234567")
+
+        assert result["kind"] == "ep"
+        assert result["canonical_number"] == "EP1234567"
+
+
+class TestWoDocuments:
+    """Tests for WIPO (WO) publication parsing — new kind 'wo'."""
+
+    def test_wo_slash_form(self):
+        """'WO 2009/151718' parses as kind=wo with year/serial canonical."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("WO 2009/151718")
+
+        assert result["kind"] == "wo"
+        assert result["canonical_number"] == "WO2009151718"
+        assert result["display"] == "PCT Pub. No. WO 2009/151718"
+        assert result["fetchable"] is False
+        assert result["reason"] == "non-US lookup not yet supported"
+
+    def test_wo_compact_form(self):
+        """'WO2009151718' (no slash) parses identically to slash form."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("WO2009151718")
+
+        assert result["kind"] == "wo"
+        assert result["canonical_number"] == "WO2009151718"
+        assert result["display"] == "PCT Pub. No. WO 2009/151718"
+
+    def test_wo_with_kind_code(self):
+        """'WO 2009/151718 A1' strips the kind code as noise."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("WO 2009/151718 A1")
+
+        assert result["kind"] == "wo"
+        assert result["canonical_number"] == "WO2009151718"
+
+
+class TestPctApplications:
+    """Tests for PCT application number parsing — new kind 'pct_app'."""
+
+    def test_pct_app_four_digit_year(self):
+        """'PCT/US2009/046667' parses as kind=pct_app."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("PCT/US2009/046667")
+
+        assert result["kind"] == "pct_app"
+        assert result["canonical_number"] == "PCT/US2009/046667"
+        assert result["display"] == "PCT Application No. PCT/US2009/046667"
+        assert result["fetchable"] is False
+        assert result["reason"] == "non-US lookup not yet supported"
+
+    def test_pct_app_two_digit_year(self):
+        """'PCT/US99/12345' (pre-2004 two-digit year, 5-digit serial) parses."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("PCT/US99/12345")
+
+        assert result["kind"] == "pct_app"
+        assert result["canonical_number"] == "PCT/US99/12345"
+
+    def test_pct_app_other_receiving_office(self):
+        """'PCT/EP2010/051234' (non-US receiving office) parses."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("PCT/EP2010/051234")
+
+        assert result["kind"] == "pct_app"
+        assert result["canonical_number"] == "PCT/EP2010/051234"
+
+
+class TestInternationalDoesNotBreakExisting:
+    """Regression guards: existing kinds keep winning over the new branches."""
+
+    def test_utility_grant_still_parses(self):
+        """Plain 8453642 is still a utility grant, not ep/wo."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("US 8,453,642 B2")
+
+        assert result["kind"] == "grant"
+        assert result["canonical_number"] == "8453642"
+
+    def test_apppub_still_parses(self):
+        """2009/0151718 is still an apppub, not wo."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("2009/0151718 A1")
+
+        assert result["kind"] == "apppub"
+        assert result["canonical_number"] == "20090151718"
+
+    def test_garbage_still_unsupported(self):
+        """'EPIC FAIL' must not match the EP branch."""
+        from patent_ref import parse_patent_ref
+
+        result = parse_patent_ref("EPIC FAIL")
+
+        assert result["kind"] == "unsupported"

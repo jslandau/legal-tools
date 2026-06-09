@@ -72,13 +72,19 @@ PatentRef semantics:
   - kind:              "grant" (utility/design/plant/reissue),
                        "apppub" (application publication),
                        "provisional" (provisional application),
+                       "ep" (European patent document),
+                       "wo" (WIPO/PCT publication),
+                       "pct_app" (PCT application number),
                        "unsupported" (unrecognized format)
   - canonical_number:  grant-utility: digits only ("8453642")
                        design/plant/reissue: letter-prefixed ("D645062", "PP12345", "RE38161")
                        apppub: 11-digit concatenated ("20090151718")
+                       ep: EP-prefixed ("EP1234567")
+                       wo: WO-prefixed concatenated ("WO2009151718")
+                       pct_app: PCT/CC format ("PCT/US2009/046667")
                        unsupported: best-effort isolated digits (may be "" if none)
   - display:           human-readable display form with commas and label
-  - fetchable:         true for grant|apppub; false for provisional|unsupported
+  - fetchable:         true for grant|apppub; false for provisional|ep|wo|pct_app|unsupported
   - reason:            why non-fetchable/unclassifiable; None when fetchable
 
 Dependencies: stdlib only. No `pip install` required.
@@ -96,10 +102,10 @@ from typing import TypedDict
 
 class PatentRef(TypedDict):
     """Structured representation of a parsed patent reference."""
-    kind: str  # "grant" | "apppub" | "provisional" | "unsupported"
+    kind: str  # "grant" | "apppub" | "provisional" | "ep" | "wo" | "pct_app" | "unsupported"
     canonical_number: str  # digits only or letter-prefixed per kind
     display: str  # human-readable form
-    fetchable: bool  # true for grant|apppub; false for provisional|unsupported
+    fetchable: bool  # true for grant|apppub; false for provisional|ep|wo|pct_app|unsupported
     reason: str | None  # why non-fetchable/unclassifiable
 
 
@@ -230,8 +236,11 @@ def parse_patent_ref(raw: str) -> PatentRef:
     4. Design grant: if leading D followed by digits.
     5. Plant grant: if leading PP followed by digits.
     6. Reissue grant: if leading RE followed by digits.
-    7. Utility grant: if 7–10 digits (after stripping kind code).
-    8. Unsupported: anything else.
+    7. EP document: EP + 7 digits (spaced or compact, optional kind code).
+    8. WO publication: WO + YYYY/NNNNNN (slash or compact, optional kind code).
+    9. PCT application: PCT/CCYYYY/NNNNNN (or 2-digit year, 5-6 digit serial).
+    10. Utility grant: if 7–10 digits (after stripping kind code).
+    11. Unsupported: anything else.
     """
     # Normalize
     normalized = _strip_noise(raw)
@@ -312,6 +321,47 @@ def parse_patent_ref(raw: str) -> PatentRef:
             display=f"U.S. Reissue Patent No. RE{_group_digits(digits)}",
             fetchable=True,
             reason=None,
+        )
+
+    # Try EP document: EP + 7 digits, compact ("EP1234567") or EPO-spaced
+    # ("EP 1 234 567"), optional trailing kind code (B1, A1, ...).
+    match = re.match(r"^EP\s?(\d(?:\s?\d){6})(?:\s?[A-C]\d)?$", normalized)
+    if match:
+        digits = re.sub(r"\s", "", match.group(1))
+        spaced = f"{digits[0]} {digits[1:4]} {digits[4:7]}"
+        return PatentRef(
+            kind="ep",
+            canonical_number=f"EP{digits}",
+            display=f"European Patent No. EP {spaced}",
+            fetchable=False,
+            reason="non-US lookup not yet supported",
+        )
+
+    # Try WO publication: WO + YYYY/NNNNNN (slash) or WOYYYYNNNNNN (compact),
+    # optional trailing kind code. Year must be plausible (19xx/20xx).
+    match = re.match(r"^WO\s?((?:19|20)\d{2})/?(\d{6})(?:\s?A\d)?$", normalized)
+    if match:
+        year, serial = match.group(1), match.group(2)
+        return PatentRef(
+            kind="wo",
+            canonical_number=f"WO{year}{serial}",
+            display=f"PCT Pub. No. WO {year}/{serial}",
+            fetchable=False,
+            reason="non-US lookup not yet supported",
+        )
+
+    # Try PCT application: PCT/CCYYYY/NNNNNN with a two-letter receiving-office
+    # code; pre-2004 numbers use a 2-digit year and 5-digit serial.
+    match = re.match(r"^PCT/([A-Z]{2})((?:19|20)?\d{2})/(\d{5,6})$", normalized)
+    if match:
+        office, year, serial = match.group(1), match.group(2), match.group(3)
+        canonical = f"PCT/{office}{year}/{serial}"
+        return PatentRef(
+            kind="pct_app",
+            canonical_number=canonical,
+            display=f"PCT Application No. {canonical}",
+            fetchable=False,
+            reason="non-US lookup not yet supported",
         )
 
     # Try utility grant: 7–10 digits (after stripping kind code)
