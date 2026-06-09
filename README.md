@@ -27,7 +27,9 @@ Checks every citation in a document against the actual source. For each citation
 - Assigns a support quality label: **Strong / Adequate / Weak / Misleading / Unable to assess**
 - Dispatches a separate Opus-tier critic subagent to independently review the analysis
 
-Output is a standalone Markdown report saved next to the original document.
+Output is multi-format, including Markdown, structured JSON data, and a default UI for exploring the structured JSON.
+
+![Image showing the Cite-Check Explorer UI](cite-report-sample.png)
 
 **Use when:** You want to verify that citations hold up — that the source actually says what the brief says it says.
 
