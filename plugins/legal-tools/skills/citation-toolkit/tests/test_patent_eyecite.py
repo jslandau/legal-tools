@@ -511,3 +511,162 @@ class TestClaimPincites:
 
         assert len(cites) == 1
         assert cites[0]["citation_type"] == "patent_claim"
+
+
+def _resolved(text: str) -> list[dict]:
+    from patent_eyecite import (
+        clean_patent_text, get_patent_citations, resolve_patent_citations,
+    )
+    return resolve_patent_citations(get_patent_citations(clean_patent_text(text)))
+
+
+class TestShortFormResolution:
+    """'NNN short forms resolve against the citation stack."""
+
+    def test_simple_resolution(self):
+        """'the '642 patent' resolves to the only matching full citation."""
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 is asserted. The '642 patent requires a vent."
+        )
+
+        short = cites[1]
+        assert short["citation_type"] == "patent_short"
+        assert short["resolved_to"] == {
+            "index": 0, "full_citation": cites[0]["full_citation"],
+        }
+        assert short["flags"] == []
+
+    def test_multi_patent_brief(self):
+        """Each short form resolves to its own patent in a two-patent brief."""
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 and U.S. Patent No. 9,154,231 are asserted. "
+            "The '642 patent claims a mask; the '231 patent claims a cushion."
+        )
+
+        assert cites[2]["resolved_to"]["index"] == 0
+        assert cites[3]["resolved_to"]["index"] == 1
+
+    def test_short_form_before_any_introduction_is_unresolved(self):
+        """A short form with an empty stack is flagged, candidates empty."""
+        cites = _resolved("The '642 patent requires a vent.")
+
+        short = cites[0]
+        assert short["resolved_to"] is None
+        assert "unresolved_short_form" in short["flags"]
+        assert short["candidates"] == []
+
+    def test_colliding_last_three_digits(self):
+        """Two distinct patents ending in the same 3 digits → unresolved
+        with both as candidates."""
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 and U.S. Patent No. 7,100,642 are asserted. "
+            "The '642 patent requires a vent."
+        )
+
+        short = cites[2]
+        assert short["resolved_to"] is None
+        assert "unresolved_short_form" in short["flags"]
+        assert short["candidates"] == [0, 1]
+
+    def test_same_patent_twice_is_not_a_collision(self):
+        """The same canonical number on the stack twice resolves to the
+        most recent occurrence, no flag."""
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 was filed in 2009. "
+            "U.S. Patent No. 8,453,642 issued in 2013. "
+            "The '642 patent is valid."
+        )
+
+        short = cites[2]
+        assert short["resolved_to"]["index"] == 1
+        assert "unresolved_short_form" not in short["flags"]
+
+    def test_nickname_digits_resolve(self):
+        """A nickname parenthetical registers its digits on the stack even
+        when they differ from the patent number's own last 3."""
+        cites = _resolved(
+            'U.S. Patent No. 8,453,642 ("the \'642 patent") is asserted. '
+            "The '642 patent requires a vent."
+        )
+
+        assert cites[1]["resolved_to"]["index"] == 0
+
+
+class TestInventorNameResolution:
+    """Inventor-name short forms resolve from in-text introductions."""
+
+    def test_nickname_parenthetical_registers_name(self):
+        """'(the Kwok patent)' introduces the name; later use resolves."""
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 (the Kwok patent) is asserted. "
+            "The Kwok patent requires a vent."
+        )
+
+        assert len(cites) == 2
+        assert cites[1]["resolved_to"]["index"] == 0
+
+    def test_to_inventor_introduction_registers_name(self):
+        """'Patent No. X to Kwok' introduces the name with zero network."""
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 to Kwok discloses a mask. "
+            "The Kwok patent requires a vent."
+        )
+
+        assert cites[1]["resolved_to"]["index"] == 0
+
+    def test_unintroduced_inventor_name_needs_metadata(self):
+        """A name never introduced in text → unresolved + needs_metadata."""
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 is asserted. "
+            "The Kwok patent requires a vent."
+        )
+
+        short = cites[1]
+        assert short["resolved_to"] is None
+        assert "unresolved_short_form" in short["flags"]
+        assert "needs_metadata" in short["flags"]
+
+
+class TestStandaloneClaimResolution:
+    """Standalone patent_claim entries resolve to the nearest preceding patent."""
+
+    def test_claim_resolves_to_nearest_preceding(self):
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 is asserted. Claim 9 recites a vent."
+        )
+
+        claim = cites[1]
+        assert claim["citation_type"] == "patent_claim"
+        assert claim["resolved_to"]["index"] == 0
+
+    def test_claim_with_no_preceding_patent_is_unresolved(self):
+        cites = _resolved("Claim 9 recites a vent.")
+
+        claim = cites[0]
+        assert claim["resolved_to"] is None
+        assert "unresolved_short_form" in claim["flags"]
+
+    def test_claim_picks_most_recent_of_two(self):
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 is asserted. "
+            "U.S. Patent No. 9,154,231 is also asserted. Claim 9 is infringed."
+        )
+
+        assert cites[2]["resolved_to"]["index"] == 1
+
+
+class TestResolutionViaCli:
+    """main() runs resolution after extraction."""
+
+    def test_cli_output_includes_resolution(self, capsys, monkeypatch):
+        import io
+        import json
+        from patent_eyecite import main
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            "U.S. Patent No. 8,453,642 is asserted. The '642 patent controls."
+        ))
+        main([])
+
+        out = json.loads(capsys.readouterr().out)
+        assert out[1]["resolved_to"]["index"] == 0

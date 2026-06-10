@@ -162,6 +162,12 @@ NICKNAME_RE = re.compile(
 # Max gap (chars) between a citation's end and its nickname parenthetical.
 NICKNAME_MAX_GAP = 20
 
+# "U.S. Patent No. 8,453,642 to Kwok" — first-named-inventor introduction.
+# Registered as an inventor nickname with zero network. NOTE: no ^ anchor —
+# this is used with .match(text, pos), and ^ would still bind to string
+# start, never matching at pos > 0. .match() itself anchors at pos.
+INVENTOR_INTRO_RE = re.compile(r"\s+to\s+(?P<name>[A-Z][a-zA-Z]+)\b")
+
 # Single-number iterator used to expand "Nos." lists.
 _NUM_ITER_RE = re.compile(rf"{_NUM}")
 
@@ -425,17 +431,145 @@ def _attach_nickname(text: str, citation: PatentCitation) -> None:
         citation["nickname"] = f"the {label} {noun}"
 
 
+def _attach_inventor_intro(text: str, citation: PatentCitation) -> None:
+    """If the long form is followed by 'to <Surname>', record it as an
+    inventor nickname (unless a parenthetical nickname already attached)."""
+    if citation["nickname"] is not None:
+        return
+    end = citation["span"][1]
+    m = INVENTOR_INTRO_RE.match(text, end)
+    if m is not None and m.group("name") not in _NOT_INVENTOR_NAMES:
+        citation["nickname"] = f"the {m.group('name')} patent"
+
+
 def _record_nickname(text: str, citation: PatentCitation, nickname_spans: list) -> None:
     """Attach nickname to citation and record its span if found.
 
     Eliminates duplicated bookkeeping between us_long and apppub branches.
     """
     _attach_nickname(text, citation)
+    _attach_inventor_intro(text, citation)
     if citation["nickname"] is not None:
         end = citation["span"][1]
         nick_m = NICKNAME_RE.search(text, end, end + NICKNAME_MAX_GAP + 60)
         if nick_m:
             nickname_spans.append((nick_m.start(), nick_m.end()))
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: short-form resolution (Functional Core)
+# ---------------------------------------------------------------------------
+
+_NICK_DIGITS_RE = re.compile(r"'(\d{3})")
+_NICK_NAME_RE = re.compile(r"\bthe\s+(?P<name>[A-Z][a-zA-Z]+)\s+patent", re.IGNORECASE)
+_SHORT_DIGITS_RE = re.compile(r"'(\d{3})")
+_SHORT_NAME_RE = re.compile(r"\b[Tt]he\s+(?P<name>[A-Z][a-zA-Z]+)\s+patent\b")
+
+
+def _stack_entry(index: int, citation: PatentCitation) -> dict:
+    """Build a stack record for a full citation."""
+    canonical = (citation["ref"] or {}).get("canonical_number", "")
+    digits = re.sub(r"\D", "", canonical)
+    entry = {
+        "index": index,
+        "full_citation": citation["full_citation"],
+        "canonical": canonical,
+        "last3": digits[-3:] if len(digits) >= 3 else digits,
+        "nick_digits": set(),
+        "names": set(),
+    }
+    nickname = citation["nickname"]
+    if nickname:
+        dm = _NICK_DIGITS_RE.search(nickname)
+        if dm:
+            entry["nick_digits"].add(dm.group(1))
+        else:
+            nm = _NICK_NAME_RE.search(nickname)
+            if nm:
+                entry["names"].add(nm.group("name").lower())
+    return entry
+
+
+def _distinct_candidates(matches: list[dict]) -> list[dict]:
+    """Collapse stack hits to one (the most recent) per canonical number."""
+    by_canonical: dict[str, dict] = {}
+    for e in matches:
+        by_canonical[e["canonical"]] = e  # later entries overwrite → most recent
+    return sorted(by_canonical.values(), key=lambda e: e["index"])
+
+
+def _mark_unresolved(citation: PatentCitation, candidates: list[dict]) -> None:
+    citation["flags"].append("unresolved_short_form")
+    citation["candidates"] = [e["index"] for e in candidates]  # type: ignore[typeddict-unknown-key]
+
+
+def resolve_patent_citations(citations: list[PatentCitation]) -> list[PatentCitation]:
+    """Single forward pass filling resolved_to on short forms and standalone
+    claims. Unresolvable entries are flagged, never dropped.
+
+    Returns the same list (entries mutated in place), matching eyecite's
+    resolve-pass shape.
+    """
+    stack: list[dict] = []
+
+    for i, cit in enumerate(citations):
+        if cit["citation_type"] == "patent":
+            if cit["ref"] and cit["ref"].get("canonical_number"):
+                stack.append(_stack_entry(i, cit))
+            continue
+
+        if cit["citation_type"] == "patent_claim":
+            if stack:
+                latest = stack[-1]
+                cit["resolved_to"] = {
+                    "index": latest["index"],
+                    "full_citation": latest["full_citation"],
+                }
+            else:
+                _mark_unresolved(cit, [])
+            continue
+
+        # patent_short — digits form or inventor-name form.
+        dm = _SHORT_DIGITS_RE.search(cit["full_citation"])
+        if dm:
+            nnn = dm.group(1)
+            matches = [
+                e for e in stack if e["last3"] == nnn or nnn in e["nick_digits"]
+            ]
+            distinct = _distinct_candidates(matches)
+            if len(distinct) == 1:
+                latest = matches[-1]
+                cit["resolved_to"] = {
+                    "index": latest["index"],
+                    "full_citation": latest["full_citation"],
+                }
+            else:
+                _mark_unresolved(cit, distinct)
+            continue
+
+        nm = _SHORT_NAME_RE.search(cit["full_citation"])
+        if nm:
+            name = nm.group("name").lower()
+            matches = [e for e in stack if name in e["names"]]
+            distinct = _distinct_candidates(matches)
+            if len(distinct) == 1:
+                latest = matches[-1]
+                cit["resolved_to"] = {
+                    "index": latest["index"],
+                    "full_citation": latest["full_citation"],
+                }
+            elif len(distinct) > 1:
+                _mark_unresolved(cit, distinct)
+            else:
+                # Name never introduced in text: metadata lookup could fix it.
+                _mark_unresolved(cit, [])
+                cit["flags"].append("needs_metadata")
+            continue
+
+        # Unrecognizable short form (defense in depth — shouldn't happen).
+        _mark_unresolved(cit, [])
+
+    return citations
 
 
 def get_patent_citations(text: str) -> list[PatentCitation]:
@@ -517,7 +651,7 @@ def main(argv: list[str]) -> int:
         text = sys.stdin.read()
 
     cleaned = clean_patent_text(text)
-    citations = get_patent_citations(cleaned)
+    citations = resolve_patent_citations(get_patent_citations(cleaned))
 
     json.dump(citations, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
