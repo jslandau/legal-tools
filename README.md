@@ -37,11 +37,12 @@ Output is a standalone Markdown report saved next to the original document.
 
 `citation-toolkit` includes a local pipeline for US patent citations, wired into `cite-checking`'s Stage 4:
 
-- **Parse / classify** (`patent_ref.py`) — turns a messy patent reference into a structured `PatentRef` (utility grant, design/plant/reissue, application publication, or provisional), stripping kind codes and labels.
-- **Fetch** (`patent_fetch.py`) — retrieves the original text-layered PDF from Google Patents (only the public patent number leaves the machine), with a usability gate that flags image-only PDFs rather than producing silent empty output.
+- **Extract** (`patent_eyecite.py`) — the patent sibling of eyecite: a single local, offline pass that finds every patent citation in a brief, parses each, attaches structured pincites (`column:line`, paragraph, or claims), and resolves short forms against a running stack. Document text never leaves the machine. Optional `--resolve-metadata` sends patent numbers only to Google Patents to resolve inventor-name short forms.
+- **Parse / classify** (`patent_ref.py`) — turns a messy patent reference into a structured `PatentRef` (utility grant, design/plant/reissue, application publication, provisional, or non-US EP / WO / PCT-application forms), stripping kind codes and labels.
+- **Fetch** (`patent_fetch.py`) — retrieves the original text-layered PDF from Google Patents (only the public patent number leaves the machine), with a usability gate that flags image-only PDFs rather than producing silent empty output; also fetches patent metadata (title / inventors / assignee) for short-form resolution.
 - **Extract + query** (`patent_extract.py` / `patent_query.py`) — builds a local `column:line` artifact from a patent PDF and resolves pinpoint citations like `6:59-7:10` (including cross-column spans) to their printed text.
 
-`cite-checking` also recognizes patent cite forms in text: long form (`U.S. Patent No. 8,453,642`), the dominant `'NNN` short form (`the '298 patent`), `column:line` grant pincites, and `[0042]` application-publication paragraph pincites.
+`cite-checking` recognizes patent cite forms in text via `patent_eyecite.py`: long form (`U.S. Patent No. 8,453,642`), `Nos.` lists, the dominant `'NNN` short form (`the '298 patent`), inventor-name short forms (`the Kwok patent`), `column:line` grant pincites, `[0042]` application-publication paragraph pincites, and claim ranges. International forms (EP / WO / PCT) parse but are not yet fetchable.
 
 **Use when:** A brief cites US patents and you want to fetch and quote the cited column:line passages.
 
@@ -63,7 +64,7 @@ Output is a JSON chain and a Markdown report (summary first, full lineage second
 
 ### `citation-toolkit` (internal)
 
-Shared vocabulary used by all three skills above: citation taxonomy, short-form resolution rules, structured component schemas, flag vocabulary, CourtListener API patterns, and model-tier guidance for subagents. Also houses the experimental US patent pipeline (`patent_ref.py`, `patent_fetch.py`, `patent_extract.py`, `patent_query.py`). Not intended to be invoked directly.
+Shared vocabulary used by all three skills above: citation taxonomy, short-form resolution rules, structured component schemas, flag vocabulary, CourtListener API patterns, and model-tier guidance for subagents. Also houses the experimental US patent pipeline (`patent_eyecite.py`, `patent_ref.py`, `patent_fetch.py`, `patent_extract.py`, `patent_query.py`). Not intended to be invoked directly.
 
 ## Installation
 
