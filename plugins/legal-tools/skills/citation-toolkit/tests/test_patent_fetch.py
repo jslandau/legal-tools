@@ -426,3 +426,109 @@ class TestLiveSmoke:
         assert result["source_url"].startswith(
             "https://patentimages.storage.googleapis.com"
         )
+
+
+class TestExtractPatentMetadata:
+    """Pure meta-tag parsing from a Google Patents page."""
+
+    def _fixture_html(self) -> str:
+        from pathlib import Path
+        fixture = (
+            Path(__file__).resolve().parent.parent
+            / "test_fixtures" / "google_patent_page.html"
+        )
+        return fixture.read_text(encoding="utf-8")
+
+    def test_inventors_extracted_in_order(self):
+        """DC.contributor scheme=inventor tags yield ordered inventor names."""
+        from patent_fetch import extract_patent_metadata
+
+        meta = extract_patent_metadata(self._fixture_html())
+
+        assert meta["inventors"][0] == "Philip Rodney Kwok"
+        assert len(meta["inventors"]) == 5
+
+    def test_assignee_extracted(self):
+        """DC.contributor scheme=assignee tag yields the assignee."""
+        from patent_fetch import extract_patent_metadata
+
+        meta = extract_patent_metadata(self._fixture_html())
+
+        assert meta["assignee"] == "Resmed Pty Ltd"
+
+    def test_title_extracted(self):
+        """DC.title meta tag yields the patent title."""
+        from patent_fetch import extract_patent_metadata
+
+        meta = extract_patent_metadata(self._fixture_html())
+
+        assert isinstance(meta["title"], str) and meta["title"]
+
+    def test_attribute_order_tolerant(self):
+        """Attributes parsed order-independently (scheme before name)."""
+        from patent_fetch import extract_patent_metadata
+
+        html = '<meta scheme="inventor" content="Jane Doe" name="DC.contributor">'
+        meta = extract_patent_metadata(html)
+
+        assert meta["inventors"] == ["Jane Doe"]
+
+    def test_empty_html_yields_empty_metadata(self):
+        from patent_fetch import extract_patent_metadata
+
+        meta = extract_patent_metadata("<html></html>")
+
+        assert meta == {"title": None, "inventors": [], "assignee": None}
+
+
+class TestFetchPatentMetadataBatch:
+    """Cached page-HTML fetch + metadata parse, no live network in tests."""
+
+    def test_cache_hit_makes_no_network_call(self, tmp_path):
+        """A cached .html file is parsed without touching the network."""
+        from pathlib import Path
+        from unittest.mock import patch
+        from patent_fetch import fetch_patent_metadata_batch, page_cache_path
+
+        fixture = (
+            Path(__file__).resolve().parent.parent
+            / "test_fixtures" / "google_patent_page.html"
+        )
+        cached = page_cache_path(tmp_path, "US8453642")
+        cached.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+
+        with patch("patent_fetch.fetch_with_backoff") as mock_fetch:
+            mock_fetch.side_effect = RuntimeError("network call not allowed")
+            result = fetch_patent_metadata_batch(["US8453642"], tmp_path)
+
+        assert result["US8453642"]["inventors"][0] == "Philip Rodney Kwok"
+
+    def test_uncached_fetch_writes_cache(self, tmp_path):
+        """An uncached id fetches the page once and caches the HTML."""
+        from pathlib import Path
+        from unittest.mock import patch
+        from patent_fetch import fetch_patent_metadata_batch, page_cache_path
+
+        fixture_bytes = (
+            Path(__file__).resolve().parent.parent
+            / "test_fixtures" / "google_patent_page.html"
+        ).read_bytes()
+
+        with patch("patent_fetch.fetch_with_backoff",
+                   return_value=(fixture_bytes, 200, None)) as mock_fetch:
+            result = fetch_patent_metadata_batch(["US8453642"], tmp_path)
+
+        assert mock_fetch.call_count == 1
+        assert page_cache_path(tmp_path, "US8453642").exists()
+        assert result["US8453642"]["assignee"] == "Resmed Pty Ltd"
+
+    def test_fetch_failure_omits_entry(self, tmp_path):
+        """A failed fetch yields no entry for that id; the batch continues."""
+        from unittest.mock import patch
+        from patent_fetch import fetch_patent_metadata_batch
+
+        with patch("patent_fetch.fetch_with_backoff",
+                   return_value=(None, 404, None)):
+            result = fetch_patent_metadata_batch(["US0000000"], tmp_path)
+
+        assert result == {}

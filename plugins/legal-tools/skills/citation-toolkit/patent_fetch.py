@@ -174,6 +174,44 @@ def cache_path(cache_dir: Path, google_id: str) -> Path:
     return cache_dir / f"{google_id}.pdf"
 
 
+_META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_META_ATTR_RE = re.compile(r'([\w.:-]+)="([^"]*)"')
+
+
+def extract_patent_metadata(html: str) -> dict:
+    """Parse title/inventors/assignee meta tags from a Google Patents page.
+
+    Attribute order inside each <meta> tag is irrelevant. Returns:
+        {"title": str | None, "inventors": [str, ...], "assignee": str | None}
+    Inventors keep page order (first-named inventor first).
+    """
+    title: str | None = None
+    inventors: list[str] = []
+    assignee: str | None = None
+
+    for tag in _META_TAG_RE.findall(html):
+        attrs = dict(_META_ATTR_RE.findall(tag))
+        name = attrs.get("name", "")
+        content = attrs.get("content", "")
+        if not content:
+            continue
+        if name == "DC.title" and title is None:
+            title = content.strip()
+        elif name == "DC.contributor":
+            scheme = attrs.get("scheme", "")
+            if scheme == "inventor":
+                inventors.append(content.strip())
+            elif scheme == "assignee" and assignee is None:
+                assignee = content.strip()
+
+    return {"title": title, "inventors": inventors, "assignee": assignee}
+
+
+def page_cache_path(cache_dir: Path, google_id: str) -> Path:
+    """Return the cache file path for a patent page's HTML."""
+    return cache_dir / f"{google_id}.html"
+
+
 # ---------------------------------------------------------------------------
 # I/O functions (Imperative Shell)
 # ---------------------------------------------------------------------------
@@ -267,6 +305,42 @@ def download_pdf(pdf_url: str, dest: Path) -> tuple[bool, str | None]:
         return True, None
     except OSError as e:
         return False, f"failed to write {dest}: {e}"
+
+
+def fetch_patent_metadata_batch(
+    google_ids: list[str], cache_dir: Path
+) -> dict[str, dict]:
+    """Fetch (with HTML caching) and parse metadata for each Google Patents id.
+
+    Returns {google_id: metadata_dict} for every id whose page was obtained;
+    failed ids are simply absent (callers treat absence as still-unresolved).
+    Applies REQUEST_SPACING_SECONDS between live fetches; cache hits are free.
+    Only patent numbers go over the wire — never document text.
+    """
+    results: dict[str, dict] = {}
+    fetched_any = False
+
+    for gid in google_ids:
+        cached = page_cache_path(cache_dir, gid)
+        if cached.exists():
+            html = cached.read_text(encoding="utf-8")
+            results[gid] = extract_patent_metadata(html)
+            continue
+
+        if fetched_any:
+            time.sleep(REQUEST_SPACING_SECONDS)
+        url = PATENT_PAGE_TMPL.format(id=gid)
+        body, status, error = fetch_with_backoff(url)
+        fetched_any = True
+        if status != 200 or not body:
+            continue
+
+        html = body.decode("utf-8", errors="replace")
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_text(html, encoding="utf-8")
+        results[gid] = extract_patent_metadata(html)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
