@@ -330,7 +330,7 @@ def fetch_patent_metadata_batch(
         if fetched_any:
             time.sleep(REQUEST_SPACING_SECONDS)
         url = PATENT_PAGE_TMPL.format(id=gid)
-        body, status, error = fetch_with_backoff(url)
+        body, status, _error = fetch_with_backoff(url)
         fetched_any = True
         if status != 200 or not body:
             continue

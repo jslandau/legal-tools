@@ -837,3 +837,31 @@ class TestResolveMetadataCli:
         out = json.loads(capsys.readouterr().out)
         assert out[1]["resolved_to"]["index"] == 0
         assert "needs_metadata" not in out[1]["flags"]
+
+    def test_non_us_citations_excluded_from_fetch_batch(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        """Non-US citations are excluded from metadata fetch.
+        When both US and non-US patents appear, only US patents are batched."""
+        import io
+        import json
+        from unittest.mock import patch
+        from patent_eyecite import main
+
+        # Input with EP (non-US), US (valid), and need-metadata short form
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            "EP1234567 and U.S. Patent No. 8,453,642 are asserted. "
+            "The Kwok patent requires improvements."
+        ))
+
+        with patch("patent_fetch.fetch_patent_metadata_batch") as mock_fetch:
+            mock_fetch.return_value = {}
+            result = main(["--resolve-metadata", "--cache-dir", str(tmp_path)])
+
+        assert result == 0
+        # Verify fetch_patent_metadata_batch was called with only the US patent
+        # (EP1234567 must be excluded due to kind guard)
+        mock_fetch.assert_called_once()
+        call_args = mock_fetch.call_args[0]
+        assert len(call_args[0]) == 1
+        assert call_args[0][0] == "US8453642"  # Only US patent in batch
