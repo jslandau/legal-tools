@@ -137,13 +137,15 @@ Identify citations of these types. The consuming skill decides what to do with e
 - Design / plant / reissue grant: `D645,062` / `PP12,345` / `RE38,161` (letter prefix kept — it identifies the document)
 - Application publication: `U.S. Patent Application Pub. No. 2009/0151718 A1` (11-digit `YYYYNNNNNNN`; cited to paragraph `[0042]`, not column:line)
 - Provisional: `60/123,456` → not publicly retrievable; flag, do not fetch
-- Parsed by `patent_ref.py` into a `PatentRef` (see Structured Component Schemas). Patents are a **gap category** — eyecite does not emit them; they are caught in the Stage 2 Pass-2 LLM gap pass.
+- Parsed by `patent_ref.py` into a `PatentRef` (see Structured Component Schemas). Patents are extracted by `patent_eyecite.py` (script section below); the LLM gap pass remains only as a recall backstop for informal references the regex finder cannot see (e.g., "the patent-in-suit").
 
-**Recognizing patent cites in text** (the gap pass looks for all of these):
+**Recognizing patent cites in text** (all extracted by `patent_eyecite.py`):
 - Long form, first mention: `U.S. Patent No. 8,453,642`, often with a parenthetical nickname `("the '642 patent")`.
 - **`'NNN` short form** (the dominant in-text form): `the '642 patent`, `the '298 patent` — an apostrophe + the last 3 digits of a grant number. This is the patent analog of `Id.`/`supra` and resolves against the citation stack to the most recent full patent number ending in those digits (see Short Forms).
-- **Pincite is `column:line`, not a page:** grants are cited `col. 5, ll. 12–18`, `5:12–18`, or `5:12`. Capture the column:line span as the pincite; it is consumed by the `patent_extract.py`/`patent_query.py` column:line pipeline.
-- **Application publications** are cited to **paragraph** `[0042]`, not column:line — capture the paragraph number as the pincite and route to paragraph handling, not the column:line pipeline.
+- **Inventor-name short form** ("the Kwok patent") — a capitalized surname + "patent", resolved to the most recent patent introduced to that inventor.
+- **Pincite is `column:line` or `¶ paragraph`:** grants are cited `col. 5, ll. 12–18`, `5:12–18`, or `5:12`; capture the column:line span as the pincite. Application publications are cited to **paragraph** `[0042]` or `¶ 42`; capture the paragraph number. Claims: `claims 1–3` are parsed and attached to their citing patent.
+- **Nos. lists** (plural patents in a single entry): `U.S. Patent Nos. 8,453,642, 8,234,821, and 8,012,944` — each number is a separate citation entry sharing the text span.
+- **International forms** (parsed via `patent_ref.py` kinds `ep`/`wo`/`pct_app`, `fetchable: false`): European patents (EP), WIPO/PCT publications (WO), PCT applications (PCT/).
 
 ---
 
@@ -156,7 +158,8 @@ Short forms require a **citation stack** — the running list of recently-cited 
 - Reporter-only: `[vol] [reporter] at [page]`
 - `supra` / `supra note [X]`
 - Informal references ("the Paxton court", "Daubert standard") → resolve to case; flag `informal_reference`
-- **Patent `'NNN` short form** ("the '642 patent", "the '298 patent") → resolve to the most recent full patent number on the stack whose grant number ends in those digits. eyecite does **not** emit patents, so unlike `Id.`/`supra` this is resolved by the LLM gap pass, not eyecite. If two stacked patents share the same last-3 digits, or none match, flag `unresolved_short_form`.
+- **Patent `'NNN` short form** ("the '642 patent", "the '298 patent") → resolved deterministically by `patent_eyecite.py`'s resolution pass (`resolve_patent_citations`). If two stacked patents share the same last-3 digits, or none match, flag `unresolved_short_form` with a `candidates` list of entry indices in the same JSON array so the consuming skill can prompt the user.
+- **Patent inventor-name short form** ("the Kwok patent") → resolved to the most recent patent introduced to that inventor. Inventor-name short forms never introduced in the text additionally carry `needs_metadata` (re-run with `--resolve-metadata` to attempt network resolution via Google Patents, patent numbers only).
 
 When a short form cannot be confidently resolved, flag it as `unresolved_short_form` for user review rather than guessing.
 
@@ -246,16 +249,28 @@ year: [number] or null
 url: [if present] or null
 ```
 
-**Patents:**
+**Patents** (extracted and resolved by `patent_eyecite.py`):
 ```
-citation_type: patent
+citation_type: patent | patent_short | patent_claim
 full_citation: [full string as it appears]
-kind: [grant | apppub | provisional | unsupported]
-canonical_number: [grant-utility digits "8453642"; design/plant/reissue letter-prefixed "D645062"; apppub 11-digit "20090151718"; unsupported best-effort digits]
-display: [e.g., U.S. Patent No. 8,453,642]
-fetchable: [true for grant|apppub; false for provisional|unsupported]
-reason: [why non-fetchable/unclassifiable] or null
+span: [start, end) in the original text
+ref: PatentRef | null
+  (null for patent_short entries; PatentRef includes kind, canonical_number,
+   display, fetchable, reason)
+pincite: {
+  "kind": "column_line" | "paragraph" | "claims" | null,
+  "start_column": int, "start_line": int,   # column_line
+  "end_column": int, "end_line": int,       # column_line
+  "paragraph": int,                         # paragraph
+  "start_claim": int, "end_claim": int      # claims
+} | null
+nickname: [e.g., "the '642 patent"] | null
+resolved_to: {"index": int, "full_citation": str} | null
+flags: [unresolved_short_form, ambiguous_pincite, needs_metadata]
+candidates: [list of indices] if unresolved_short_form
 ```
+
+**Kind vocabulary:** `grant` (utility, design, plant, reissue), `apppub` (application publication), `provisional` (not publicly retrievable), `ep` (European), `wo` (WIPO/PCT), `pct_app` (PCT application), `unsupported` (unclassifiable). Fetchable: true for `grant` and `apppub` only.
 
 **Constitutional Provisions:**
 ```
@@ -573,6 +588,84 @@ Or via stdin. The script is stdlib-only — no `pip install` required.
 
 ---
 
+## Extraction: `patent_eyecite.py`
+
+Extracts every patent citation from brief or document text — the patent sibling of `eyecite_extract.py`. Like eyecite, the tool extracts, parses, and resolves short forms in a single local pass. Document text never leaves the machine.
+
+### How to run patent_eyecite locally
+
+The script lives in this skill's directory: `patent_eyecite.py`. It reads from a file or stdin and emits a JSON array of toolkit-shaped patent citation entries on stdout.
+
+```bash
+python3 plugins/legal-tools/skills/citation-toolkit/patent_eyecite.py --input brief.txt
+# or:
+cat brief.txt | python3 plugins/legal-tools/skills/citation-toolkit/patent_eyecite.py
+```
+
+The script does not make any network calls. Default run is fully offline and stdlib-only (imports only `patent_ref.py`).
+
+### Sample output
+
+One entry per citation, document order:
+
+```json
+[
+  {
+    "citation_type": "patent",
+    "full_citation": "U.S. Patent No. 8,453,642",
+    "span": [120, 146],
+    "ref": {
+      "kind": "grant",
+      "canonical_number": "8453642",
+      "display": "U.S. Patent No. 8,453,642",
+      "fetchable": true,
+      "reason": null
+    },
+    "pincite": {
+      "kind": "column_line",
+      "start_column": 5,
+      "start_line": 12,
+      "end_column": 5,
+      "end_line": 18
+    },
+    "nickname": "the '642 patent",
+    "resolved_to": null,
+    "flags": []
+  }
+]
+```
+
+### Three-layer API
+
+The script's three public functions mirror eyecite's design:
+
+- **`clean_patent_text(text)`** → `str` — normalizes text for matching (curly quotes, dashes, newlines become their ASCII equivalents). Strictly 1:1 character replacement; spans computed on the cleaned text are valid in the original.
+- **`get_patent_citations(text)`** → `list` — finds all patent citations in cleaned text, parses them, and attaches pincites.
+- **`resolve_patent_citations(cites)`** → `list` — single forward pass filling `resolved_to` on short forms and standalone claims using a running stack. Unresolvable entries are flagged, never dropped.
+
+### Pincite gating contract
+
+Pincites attach only within approximately 80 characters after a citation, crossing only whitespace, commas, and the word "at". A bare `N:M` outside this window is never emitted. In-window compact matches carrying an adjacent `§` are flagged `ambiguous_pincite` (the `§` signals the `N:M` may be a statute section, not a column:line reference).
+
+### Flag vocabulary
+
+- **`unresolved_short_form`** — Could not link a short form (`'NNN` or inventor-name) to a full citation in the running stack. Includes a `candidates` list of entry indices where collisions occur, so the consuming skill can prompt the user.
+- **`ambiguous_pincite`** — Compact `N:M` match carries a `§` signal; the proximity gating accepted it but the brief's context is ambiguous.
+- **`needs_metadata`** — Inventor-name short form (`"the Kwok patent"`) was never introduced in preceding text. Re-run with `--resolve-metadata` to attempt network resolution.
+
+### Network opt-in: `--resolve-metadata`
+
+```bash
+python3 plugins/legal-tools/skills/citation-toolkit/patent_eyecite.py \
+  --input brief.txt \
+  --resolve-metadata \
+  --cache-dir ./patent_cache
+```
+
+Sends **patent numbers only** (never document text) to Google Patents to fetch inventor lists for any short form flagged `needs_metadata`. Uses `patent_fetch.py`'s caching to avoid redundant requests. The `--cache-dir` option specifies where to store cached HTML; defaults to `patent_fetch.py`'s `patent_cache/` directory.
+
+---
+
 ## Patent column:line extraction
 
 US patent documents cite column and line numbers — e.g., `4:32-38` means column 4, lines 32–38 — to pinpoint passages in their specification. This skill provides tools to extract, query, and verify these citations locally without leaving the machine.
@@ -668,7 +761,7 @@ The build-once/query-many split is intentional. The geometric complexity (gutter
 - **Local-only:** The PDF and extracted text never leave the machine. Both scripts run entirely offline.
 - **Confidence signals:** Each page's diagnostic includes `is_body` (boolean — is this a numbered column:line page whose text is extracted and which consumes column numbers), `flagged` (boolean — does the page warrant a human look) and `flag_reason` (string), plus the per-page `max_marker_residual` confidence metric. `is_body` and `flagged` are usually opposites, but a body page can be both (e.g. a gutter cross-check disagreement is extracted *and* surfaced for review). Use these to assess extraction confidence before relying on a document's citations.
 - **Page classification (voting rule):** A page is body text if it has a clean gutter line-model fit, OR both column-number headers, OR at least two of {≥2 gutter markers, ≥1 column header, ≥100 words}. This admits single-column **claims tails** — including very short ones with zero multiple-of-5 gutter line-numbers, where the gutter is recovered from the column-header midpoint. Marker-less columns emit `unknown` slots rather than guessing blanks.
-- **Citation recognition:** Patent-cite recognition rules (determining when a string like `4:32-38` appears in text and signifying a column:line reference) are out of scope here. The cite-check skill will integrate those rules and consume these scripts' outputs.
+- **Citation recognition:** Patent-cite recognition is implemented by `patent_eyecite.py` (including the proximity-gated `4:32-38` pincite rules); cite-checking consumes its output.
 
 ---
 
