@@ -447,16 +447,20 @@ def _attach_inventor_intro(text: str, citation: PatentCitation) -> None:
     end = citation["span"][1]
     m = INVENTOR_INTRO_RE.match(text, end)
     if m is not None and m.group("name") not in _NOT_INVENTOR_NAMES:
-        # Check if name is followed by a corporate marker (e.g., "Sony Corporation").
-        # If so, skip registration — it's a corporate assignee, not an inventor.
+        # Check if name is followed by a corporate marker (e.g., "Sony Corporation"
+        # or "Apple, Inc."). A comma immediately after the name is a corporate-name
+        # signal. Also scan for multi-word company names (e.g., "Sony Electronics Inc.").
         name = m.group("name")
         # m.end() gives absolute position after the matched name
-        peek_text = text[m.end():m.end() + 30]
-        # Look for whitespace followed by a corporate marker word
-        marker_match = re.match(r"^\s+([A-Za-z.]+)", peek_text)
+        peek_text = text[m.end():m.end() + 50]
+        # Tolerate optional comma + whitespace, then scan up to 2 capitalized tokens
+        # for corporate markers.
+        marker_match = re.match(r"^,?\s*([A-Za-z.]+)(?:\s+([A-Za-z.]+))?", peek_text)
         if marker_match:
-            potential_marker = marker_match.group(1)
-            if potential_marker in _CORPORATE_MARKERS:
+            # Check first token and (if present) second token for corporate markers
+            token1 = marker_match.group(1)
+            token2 = marker_match.group(2)
+            if token1 in _CORPORATE_MARKERS or (token2 and token2 in _CORPORATE_MARKERS):
                 return  # Don't register; it's a corporate assignee
         citation["nickname"] = f"the {name} patent"
 

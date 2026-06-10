@@ -618,7 +618,7 @@ class TestInventorNameResolution:
         """'Patent No. X to Sony Corporation' should NOT register a nickname
         because 'Sony' is followed by a corporate marker (Corporation, Inc, etc).
         This ensures 'the Sony patent' remains unresolved."""
-        cites = _cites(
+        cites = _resolved(
             "U.S. Patent No. 8,453,642 to Sony Corporation discloses a mask. "
             "The Sony patent requires a vent."
         )
@@ -627,6 +627,37 @@ class TestInventorNameResolution:
         assert cites[0]["nickname"] is None
         # The short form "the Sony patent" should not resolve (no inventor intro)
         assert cites[1]["citation_type"] == "patent_short"
+        assert cites[1]["resolved_to"] is None
+
+    def test_to_corporate_assignee_with_comma_does_not_register_nickname(self):
+        """'Patent No. X to Apple, Inc.' should NOT register a nickname.
+        The comma immediately after the name is a corporate-name signal.
+        This ensures 'the Apple patent' remains unresolved."""
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 to Apple, Inc. discloses a mask. "
+            "The Apple patent requires a vent."
+        )
+
+        # The long form should NOT have a nickname set
+        assert cites[0]["nickname"] is None
+        # The short form should not resolve
+        assert cites[1]["citation_type"] == "patent_short"
+        assert cites[1]["resolved_to"] is None
+
+    def test_to_corporate_assignee_multiword_does_not_register_nickname(self):
+        """'Patent No. X to Sony Electronics Inc.' should NOT register a nickname.
+        Multi-word company names (Sony Electronics) followed by a corporate marker.
+        This ensures 'the Sony patent' remains unresolved."""
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 to Sony Electronics Inc. discloses a mask. "
+            "The Sony patent requires a vent."
+        )
+
+        # The long form should NOT have a nickname set
+        assert cites[0]["nickname"] is None
+        # The short form should not resolve
+        assert cites[1]["citation_type"] == "patent_short"
+        assert cites[1]["resolved_to"] is None
 
     def test_to_single_word_inventor_does_register_nickname(self):
         """'Patent No. X to Kwok' (single word, no corporate marker) DOES
