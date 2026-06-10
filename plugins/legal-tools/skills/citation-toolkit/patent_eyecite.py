@@ -595,6 +595,64 @@ def resolve_patent_citations(citations: list[PatentCitation]) -> list[PatentCita
     return citations
 
 
+def apply_inventor_metadata(
+    citations: list[PatentCitation],
+    inventors_by_canonical: dict[str, list[str]],
+) -> list[PatentCitation]:
+    """Re-resolve needs_metadata inventor-name short forms using fetched
+    inventor lists, keyed by the full citation's canonical_number.
+
+    Pure: the caller (the --resolve-metadata shell path) does the fetching.
+    Matching uses the FIRST-named inventor's surname, case-insensitive.
+    Mutates and returns the same list.
+    """
+    def _first_surname(inventors: list[str]) -> str | None:
+        if not inventors or not inventors[0].strip():
+            return None
+        return inventors[0].strip().split()[-1].lower()
+
+    for i, cit in enumerate(citations):
+        if "needs_metadata" not in cit["flags"]:
+            continue
+        nm = _SHORT_NAME_RE.search(cit["full_citation"])
+        if nm is None:
+            continue
+        name = nm.group("name").lower()
+
+        matches = []
+        for j in range(i):
+            full = citations[j]
+            if full["citation_type"] != "patent" or not full["ref"]:
+                continue
+            canonical = full["ref"].get("canonical_number", "")
+            surname = _first_surname(inventors_by_canonical.get(canonical, []))
+            if surname == name:
+                matches.append(j)
+
+        distinct = sorted({
+            citations[j]["ref"]["canonical_number"]: j for j in matches
+        }.values())
+        if len(distinct) == 1:
+            latest = matches[-1]
+            cit["resolved_to"] = {
+                "index": latest,
+                "full_citation": citations[latest]["full_citation"],
+            }
+            cit["flags"] = [
+                f for f in cit["flags"]
+                if f not in ("unresolved_short_form", "needs_metadata")
+            ]
+            cit.pop("candidates", None)  # type: ignore[misc]
+        elif len(distinct) > 1:
+            cit["candidates"] = distinct  # type: ignore[typeddict-unknown-key]
+            # Defense in depth: don't depend on Phase 4 having flagged this
+            # entry — an ambiguous metadata result must stay user-visible.
+            if "unresolved_short_form" not in cit["flags"]:
+                cit["flags"].append("unresolved_short_form")
+
+    return citations
+
+
 def get_patent_citations(text: str) -> list[PatentCitation]:
     """Find and parse all patent citations in cleaned text, document order.
 
@@ -661,6 +719,16 @@ def main(argv: list[str]) -> int:
                     "Reads raw text; writes a JSON array of citations to stdout.",
     )
     parser.add_argument("--input", help="Path to input text file. If omitted, read stdin.")
+    parser.add_argument(
+        "--resolve-metadata", action="store_true",
+        help="Resolve inventor-name short forms via Google Patents metadata "
+             "(network: sends patent numbers only, never document text).",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        help="Cache directory for fetched patent pages "
+             "(default: patent_fetch.py's patent_cache/).",
+    )
     args = parser.parse_args(argv)
 
     if args.input:
@@ -675,6 +743,41 @@ def main(argv: list[str]) -> int:
 
     cleaned = clean_patent_text(text)
     citations = resolve_patent_citations(get_patent_citations(cleaned))
+
+    if args.resolve_metadata and any(
+        "needs_metadata" in c["flags"] for c in citations
+    ):
+        # Lazy import: patent_fetch transitively imports pdfplumber; the
+        # default offline run must stay stdlib-only.
+        from pathlib import Path
+        import patent_fetch
+
+        cache_dir = (
+            Path(args.cache_dir) if args.cache_dir
+            else patent_fetch.DEFAULT_CACHE_DIR
+        )
+        wanted: dict[str, str] = {}  # google_id -> canonical_number
+        for c in citations:
+            ref = c["ref"]
+            # Guard on US kinds explicitly, not just fetchable:
+            # patent_fetch.google_id unconditionally prefixes "US", so a
+            # non-US kind ever becoming fetchable must not slip through here.
+            if (
+                c["citation_type"] == "patent"
+                and ref is not None
+                and ref.get("fetchable")
+                and ref.get("kind") in ("grant", "apppub")
+            ):
+                gid = patent_fetch.google_id(ref["kind"], ref["canonical_number"])
+                wanted[gid] = ref["canonical_number"]
+
+        metadata = patent_fetch.fetch_patent_metadata_batch(
+            list(wanted), cache_dir
+        )
+        inventors_by_canonical = {
+            wanted[gid]: meta["inventors"] for gid, meta in metadata.items()
+        }
+        apply_inventor_metadata(citations, inventors_by_canonical)
 
     json.dump(citations, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")

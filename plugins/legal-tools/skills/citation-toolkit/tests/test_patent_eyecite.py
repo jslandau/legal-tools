@@ -726,3 +726,114 @@ class TestResolutionViaCli:
 
         out = json.loads(capsys.readouterr().out)
         assert out[1]["resolved_to"]["index"] == 0
+
+
+class TestApplyInventorMetadata:
+    """Pure re-resolution of needs_metadata short forms from inventor names."""
+
+    def _needs_metadata_cites(self) -> list[dict]:
+        return _resolved(
+            "U.S. Patent No. 8,453,642 is asserted. "
+            "The Kwok patent requires a vent."
+        )
+
+    def test_metadata_resolves_inventor_short_form(self):
+        """First-named-inventor surname match resolves and clears flags."""
+        from patent_eyecite import apply_inventor_metadata
+
+        cites = self._needs_metadata_cites()
+        apply_inventor_metadata(
+            cites, {"8453642": ["Philip Rodney Kwok", "Ron Richard"]}
+        )
+
+        short = cites[1]
+        assert short["resolved_to"] == {
+            "index": 0, "full_citation": cites[0]["full_citation"],
+        }
+        assert "unresolved_short_form" not in short["flags"]
+        assert "needs_metadata" not in short["flags"]
+
+    def test_surname_match_is_case_insensitive(self):
+        from patent_eyecite import apply_inventor_metadata
+
+        cites = self._needs_metadata_cites()
+        apply_inventor_metadata(cites, {"8453642": ["philip rodney KWOK"]})
+
+        assert cites[1]["resolved_to"] is not None
+
+    def test_non_matching_metadata_stays_flagged(self):
+        """No surname match → flags stay; nothing resolved."""
+        from patent_eyecite import apply_inventor_metadata
+
+        cites = self._needs_metadata_cites()
+        apply_inventor_metadata(cites, {"8453642": ["Jane Doe"]})
+
+        assert cites[1]["resolved_to"] is None
+        assert "needs_metadata" in cites[1]["flags"]
+
+    def test_two_patents_same_surname_stays_ambiguous(self):
+        """Two distinct patents with the same surname → still unresolved,
+        both listed as candidates."""
+        from patent_eyecite import apply_inventor_metadata
+
+        cites = _resolved(
+            "U.S. Patent No. 8,453,642 and U.S. Patent No. 9,154,231 are asserted. "
+            "The Kwok patent requires a vent."
+        )
+        apply_inventor_metadata(cites, {
+            "8453642": ["Philip Rodney Kwok"],
+            "9154231": ["Alice Kwok"],
+        })
+
+        short = cites[2]
+        assert short["resolved_to"] is None
+        assert "unresolved_short_form" in short["flags"]
+        assert short["candidates"] == [0, 1]
+
+
+class TestResolveMetadataCli:
+    """--resolve-metadata wiring and the no-network default guarantee."""
+
+    def test_default_run_makes_no_network_calls(self, capsys, monkeypatch):
+        """Flagless main() never opens a socket: urlopen is booby-trapped."""
+        import io
+        import urllib.request
+        from patent_eyecite import main
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("network call attempted in default run")
+
+        monkeypatch.setattr(urllib.request, "urlopen", _boom)
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            "U.S. Patent No. 8,453,642 is asserted. The Kwok patent controls."
+        ))
+
+        assert main([]) == 0
+
+    def test_resolve_metadata_flag_resolves_via_fixture(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        """--resolve-metadata resolves an unintroduced inventor name using a
+        pre-seeded HTML cache (no live network)."""
+        import io
+        import json
+        from pathlib import Path
+        import patent_fetch
+        from patent_eyecite import main
+
+        fixture = (
+            Path(__file__).resolve().parent.parent
+            / "test_fixtures" / "google_patent_page.html"
+        )
+        cached = patent_fetch.page_cache_path(tmp_path, "US8453642")
+        cached.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            "U.S. Patent No. 8,453,642 is asserted. The Kwok patent controls."
+        ))
+        result = main(["--resolve-metadata", "--cache-dir", str(tmp_path)])
+
+        assert result == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out[1]["resolved_to"]["index"] == 0
+        assert "needs_metadata" not in out[1]["flags"]
