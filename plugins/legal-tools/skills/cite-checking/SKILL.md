@@ -67,21 +67,30 @@ Extraction is a two-pass process: **eyecite first, then a focused LLM gap pass f
 
 **Pass 1 — eyecite (authoritative for recognized types).** Follow the **"Extraction: eyecite is the primitive (local only)"** section of `citation-toolkit`. Run the local `eyecite_extract.py` script in `citation-toolkit/` — extraction stays on-machine because briefs are routinely privileged. **Do NOT use the MCP's `extract_citations` or `analyze_citations` for this** (they upload the document text). The script's output is a JSON array of citations in document order with `Id.`/`supra`/short cites already linked to their antecedents — that *is* your citation stack for Stage 3, no manual re-derivation needed.
 
-**Pass 2 — gap pass.** Walk the substantive text once looking *only* for the gap categories listed in `citation-toolkit` (administrative decisions, EU/international cases, popular-name statutes, informal constitutional references, state constitutional provisions, statute subsection breakdowns, patent numbers). Add these to the array produced by Pass 1. Do not re-extract anything eyecite already found.
+**Pass 1b — patent extraction.** Run `patent_eyecite.py` once over the substantive text to extract every patent citation at document level (parallel to Pass 1 eyecite but for patents only):
 
-Patent numbers are a gap category — eyecite does not emit them. Identify them here; resolution and fetching happen in Stage 4 via the two-phase patent path (see the **Patents** lookup block). Record the raw cited string and the proposition as for any gap cite; do not attempt to fetch during extraction.
+```bash
+python3 plugins/legal-tools/skills/citation-toolkit/patent_eyecite.py --input <text-file>
+```
 
-Recognize every patent-cite form (see `citation-toolkit`'s **Patents** recognition rules, which this skill owns the integration of):
-- **Long form** — `U.S. Patent No. 8,453,642`, often with a nickname parenthetical `("the '642 patent")`. Record the full number and add the nickname to the citation stack.
-- **`'NNN` short form** — `the '642 patent` / `the '298 patent`. Resolve against the stack to the full number ending in those digits (toolkit **Short Forms**); flag `unresolved_short_form` when ambiguous. This is the dominant in-text form — do not skip it.
-- **Pincite is `column:line`, not a page** — `col. 5, ll. 12–18`, `5:12–18`. Capture the column:line span as the citation's pincite; Stage 4 routes grants through the `patent_extract.py`/`patent_query.py` column:line pipeline that consumes it.
-- **Application publications** pincite to **paragraph** `[0042]` — capture the paragraph, route to paragraph handling (not column:line).
+This produces a JSON array of patent entries (in document order) with:
+- **Spans** (start/end offsets in the original text)
+- **Parsed `ref`** (a `PatentRef` from `patent_ref.py` — kind, canonical_number, fetchable, reason)
+- **Pincites** (structured: `column_line` with start/end column/line for grants, `paragraph` for app-pubs, `claims` for claim ranges)
+- **Nicknames** (from parenthetical introductions, e.g., "the '642 patent")
+- **Short-form resolution** (already resolved against the running stack within the script; short forms pointing to full citations carry `resolved_to`)
 
-**Pass 3 — proposition extraction.** For every citation (eyecite-extracted *and* gap-pass), capture the assertive clause it supports. eyecite returns the citation strings and their span offsets, not the propositional context — that is on you. Follow the **Proposition Extraction** rules in `citation-toolkit` (specific-assertion vs paragraph scope, mid-sentence and footnote handling, string-cite sharing, short-form propositions, `ambiguous_proposition` flag). Use the spans from Pass 1 to locate each citation in the source text precisely.
+All of this is already extracted and parsed — no manual patent-string parsing required in this skill. Like eyecite, the script handles both full citations and short forms in a single pass.
+
+**Pass 2 — gap pass (recall backstop only).** Walk the substantive text *once* looking only for the non-patent gap categories listed in `citation-toolkit` (administrative decisions, EU/international cases, popular-name statutes, informal constitutional references, state constitutional provisions, statute subsection breakdowns). Add these to the arrays produced by Pass 1 (eyecite) and Pass 1b (patent_eyecite). Do not re-extract anything eyecite or patent_eyecite already found.
+
+For informal patent references that the script cannot see (e.g., "the patent-in-suit", "Smith's invention" without an earlier full-form introduction), note them separately — these are recall-backstop finds, not the primary extraction. The script is authoritative for recognizable forms (long form, `'NNN` short form, inventor-name short form, pincites); the gap pass fills in edge cases only.
+
+**Pass 3 — proposition extraction.** For every citation (eyecite-extracted, patent_eyecite-extracted, *and* gap-pass), capture the assertive clause it supports. eyecite and patent_eyecite return citation strings and span offsets, not propositional context — that is on you. Follow the **Proposition Extraction** rules in `citation-toolkit` (specific-assertion vs paragraph scope, mid-sentence and footnote handling, string-cite sharing, short-form propositions, `ambiguous_proposition` flag). Use the spans from Pass 1 and Pass 1b to locate each citation in the source text precisely.
 
 Apply the **Parenthetical Handling** rules from `citation-toolkit` when deciding whether a parenthetical like `(quoting X)` or `(citing Y)` creates an independent citation entry.
 
-Maintain a **citation stack** only for gap-category cites and for any eyecite short forms flagged `unresolved_short_form` — eyecite already maintains the stack for everything else. Patents belong in this stack: push each full patent number (and any nickname parenthetical) so the `'NNN` short form can be resolved back to it.
+Maintain a **citation stack** only for gap-category cites and for any eyecite/patent_eyecite short forms flagged `unresolved_short_form` — both scripts already maintain the stack internally for everything else.
 
 ---
 
@@ -131,17 +140,14 @@ Each result carries `status`, `section_text`, `subsection_text` (when a subsecti
 1. Cornell LII (law.cornell.edu) — covers FRCP, FRAP, FRE, and other federal rules. Not yet wired into `lii_fetcher.py`; navigate to title and section directly until the rules type is folded in.
 2. Direct court websites — Supreme Court Rules at supremecourt.gov
 
-**Patents (U.S. Patent Nos. and application publications):** Resolve and fetch via the two patent primitives in `citation-toolkit` — `patent_ref.py` (pure parse/classify) then `patent_fetch.py` (Google Patents fetch + usability gate). See `citation-toolkit`'s **Patents** citation-type and `PatentRef` schema for the parsed shape. Run as **two sequential batch passes** so the user is prompted at most twice for the whole batch, never per citation:
+**Patents (U.S. Patent Nos. and application publications):** Script-extracted patents (from Stage 2, Pass 1b) arrive pre-parsed and short-form-resolved via `patent_eyecite.py`. Each entry carries a `ref` (a `PatentRef` with kind, canonical_number, fetchable status) and structured pincites (`column_line`, `paragraph`, or `claims`). Handle flags first, then fetch PDFs:
 
-*Phase A — Resolve.* Build one JSON array of every raw patent string from Stage 2 and parse the batch once:
+*Flag handling — must run before fetch:*
+- **`unresolved_short_form`** — The script could not resolve a short form (`'NNN` or inventor-name) to a full citation. The entry includes a `candidates` list of indices into the same JSON array. Prompt the user once (batched) to select which full patent the short form refers to, then update `resolved_to`.
+- **`needs_metadata`** — An inventor-name short form was never introduced in preceding text. Offer to re-run the extraction with `--resolve-metadata` (network: patent numbers only, sent to Google Patents). If the user agrees, rebuild the extraction and re-check flags.
+- **`ambiguous_pincite`** — A compact `N:M` pincite carries a `§` signal (possible statute section, not column:line). Confirm with the user that the pincite is intended to be column:line before routing to verify.
 
-```bash
-python3 plugins/legal-tools/skills/citation-toolkit/patent_ref.py --input patent-refs.json > patent-refs-out.json
-```
-
-Each result is a `PatentRef` with `kind`, `canonical_number`, `fetchable`, `reason`. For any entry that comes back `kind="unsupported"`, ask the user **once, in a single batched prompt**, to classify it: pick the type (utility grant / design / plant / reissue / app-pub / provisional-skip) **and** confirm the number, with the parser's best-effort isolated digits (`canonical_number`) **pre-filled as an editable default** (single keystroke to accept, or erase to correct). Rebuild a `PatentRef` from each answer. `kind="provisional"` is a deliberate skip (not publicly retrievable) — flag it and move on. End of Phase A: every entry is either a fetchable `PatentRef` or an explicit skip. The pure parser never prompts; the asking lives here (same division as `lii_fetcher`'s `not_found` escalation).
-
-*Phase B — Fetch.* Pass all fetchable refs to the fetcher in one batch:
+*Fetch via `patent_fetch.py` (gap-pass patents and any flagged script-extracted patents awaiting user action):* Build one JSON array of every patent that needs fetching and pass to the fetcher in one batch:
 
 ```bash
 python3 plugins/legal-tools/skills/citation-toolkit/patent_fetch.py --input patent-fetch.json > patent-fetch-out.json
@@ -151,22 +157,16 @@ Each result carries `status` (`ok` | `not_located` | `image_only` | `rejected`),
 
 *Status handling:*
 - `ok` — text-layered PDF saved; route it (below).
-- `not_located` — Google page 404 / no `citation_pdf_url` / fetch failed. Flag `US X,XXX,XXX not located`; ask the user for a local copy (Phase-B prompt); if none, mark `unverifiable`.
+- `not_located` — Google page 404 / no `citation_pdf_url` / fetch failed. Flag `US X,XXX,XXX not located`; ask the user for a local copy; if none, mark `unverifiable`.
 - `image_only` — fetched a valid PDF but it has no text layer. Flag `US X,XXX,XXX has no text layer — extraction unavailable`; ask for a local copy; the tool never OCRs on its own.
-- `rejected` — a non-fetchable kind reached the fetcher (provisional/unsupported). This should not occur after Phase A; if it does, treat as a skip and surface the `reason`.
+- `rejected` — a non-fetchable kind (provisional/international unsupported). Skip and surface the `reason`.
 
 *Routing the `ok` results:*
 - `kind="grant"` → the patent **column:line extract/query pipeline** — `patent_extract.py` then `patent_query.py` (see `citation-toolkit`'s **Patent column:line extraction**). Patents are cited to `column:line`.
-- `kind="apppub"` → **paragraph-numbered handling**, processed *outside* the column:line pipeline (application publications are cited to paragraph `[0042]`, not column:line). This routing is out of scope for the extract/query pipeline here — flag the apppub for paragraph-based pincite handling.
+- `kind="apppub"` → **paragraph-numbered handling**, processed outside the column:line pipeline (application publications are cited to paragraph `[0042]`, not column:line). Flag the apppub for paragraph-based pincite handling.
+- `kind="ep"`, `kind="wo"`, `kind="pct_app"` (international) — arrive `fetchable: false` from the script. Record and skip; non-US lookup is not yet supported.
 
 *Privilege note.* Fetching a public patent PDF sends only the **public patent number** outbound (to Google) — the opposite direction from the document-text confidentiality rule that governs extraction. No privileged document text leaves the machine.
-
-*Mixed-batch walkthrough.* Suppose Stage 2 surfaced four patent references: `US 8,453,642 B2`, `US 12,000,000` (a 2024 grant), `app no. 13/995,123 (garbled)`, and `60/123,456`.
-
-- **Phase A (resolve, one batch):** `8453642 → grant/fetchable`; `12000000 → grant/fetchable`; `13/995,123 → unsupported` (prompt the user once; the parser prefills its best-effort digits `13995123`, and **the user manually edits them** to the correct app-pub form `2013/0995123` — this digit change is the human-in-the-loop correction, not a parser transformation); `60/123,456 → provisional` (skip, flagged not-retrievable). After Phase A: three fetchable refs, one skip.
-- **Phase B (fetch, one batch):** `US8453642 → ok` (route to extract/query); `US12000000 → image_only` (2024 grants can be image-only even on Google — flag, ask for a local copy); `US20130995123 → ok` (apppub — route to paragraph handling); provisional was never fetched. The user is prompted once for the `image_only` local copy.
-
-Per-item status report: `ok` (8453642), `image_only` (12000000), `ok` (apppub), `rejected/skip` (provisional). One Phase-A prompt, one Phase-B prompt for the whole batch.
 
 **Constitutional provisions:**
 Text is resolved directly from the provision citation — no external lookup required for text. The text of U.S. constitutional provisions is settled; use the standard text.
@@ -226,7 +226,7 @@ Extract enough context to understand the proposition being stated (typically 100
 
 Patent pincites use column:line coordinates (e.g., `5:10-6:3`) rather than page numbers. The brief contains a quote from the patent, and verification means locating that exact passage in the artifact's normalized text grid.
 
-**Precondition.** Stage 4 Phase B returned `status: ok`, `kind: grant`, and the artifact has been built via `patent_extract.py build`. The brief carries a quoted passage and a `column:line` pincite (from Stage 4).
+**Precondition.** Stage 4 returned `status: ok`, `kind: grant`, and the artifact has been built via `patent_extract.py build`. Script-extracted patent entries (Pass 1b) carry a structured `pincite` with `kind: "column_line"` and numeric `start_column`, `start_line`, `end_column`, `end_line` fields, mapping directly to the cite string format `start_column:start_line-end_column:end_line` consumed by `patent_verify.py`.
 
 **The ladder** (LLM-executed; deterministic emit/resolve via `patent_verify.py` batch entries):
 
