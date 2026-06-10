@@ -337,3 +337,177 @@ class TestCli:
         out = json.loads(capsys.readouterr().out)
         start, end = out[0]["span"]
         assert original[start:end] == "the '642 patent"
+
+
+class TestExplicitColumnLinePincites:
+    """Explicit col./ll. pincites attach inside the proximity window."""
+
+    def test_col_ll_range(self):
+        """'col. 4, ll. 12-15' attaches as a column_line pincite."""
+        cites = _cites("U.S. Patent No. 8,453,642, col. 4, ll. 12-15.")
+
+        p = cites[0]["pincite"]
+        assert p == {
+            "kind": "column_line",
+            "start_column": 4, "start_line": 12,
+            "end_column": 4, "end_line": 15,
+        }
+
+    def test_col_single_line(self):
+        """'col. 4, l. 12' attaches with start == end."""
+        cites = _cites("the '642 patent at col. 4, l. 12")
+
+        p = cites[0]["pincite"]
+        assert p["start_line"] == 12 and p["end_line"] == 12
+
+    def test_spelled_out_column_lines(self):
+        """'column 4, lines 12-15' (spelled out) attaches."""
+        cites = _cites("U.S. Patent No. 8,453,642 at column 4, lines 12-15.")
+
+        assert cites[0]["pincite"]["start_column"] == 4
+
+    def test_cross_column_explicit(self):
+        """'col. 4, l. 65 to col. 5, l. 3' attaches as a cross-column span."""
+        cites = _cites("the '642 patent, col. 4, l. 65 to col. 5, l. 3")
+
+        p = cites[0]["pincite"]
+        assert p == {
+            "kind": "column_line",
+            "start_column": 4, "start_line": 65,
+            "end_column": 5, "end_line": 3,
+        }
+
+
+class TestCompactPincites:
+    """Compact N:M pincites: in-window only, never bare in prose."""
+
+    def test_compact_in_window(self):
+        """'the '642 patent at 5:12-18' attaches."""
+        cites = _cites("the '642 patent at 5:12-18 discloses the seal")
+
+        p = cites[0]["pincite"]
+        assert p == {
+            "kind": "column_line",
+            "start_column": 5, "start_line": 12,
+            "end_column": 5, "end_line": 18,
+        }
+
+    def test_compact_cross_column(self):
+        """'4:65-5:3' cross-column compact form attaches."""
+        cites = _cites("U.S. Patent No. 8,453,642 at 4:65-5:3.")
+
+        p = cites[0]["pincite"]
+        assert p == {
+            "kind": "column_line",
+            "start_column": 4, "start_line": 65,
+            "end_column": 5, "end_line": 3,
+        }
+
+    def test_compact_single_point(self):
+        """'5:12' single point attaches with start == end."""
+        cites = _cites("the '642 patent, 5:12")
+
+        p = cites[0]["pincite"]
+        assert (p["start_column"], p["start_line"]) == (5, 12)
+        assert (p["end_column"], p["end_line"]) == (5, 12)
+
+    def test_bare_ratio_outside_window_not_emitted(self):
+        """A bare N:M with no citation nearby is never a citation or pincite."""
+        assert _cites("The vote split 5:4 and the odds were 12:1.") == []
+
+    def test_out_of_window_compact_does_not_attach(self):
+        """A compact N:M past the window boundary does not attach."""
+        text = (
+            "U.S. Patent No. 8,453,642 discloses a respiratory mask assembly "
+            "with an improved vent arrangement for exhaust gas washout. "
+            "Meanwhile the meeting ran from 5:12 onward."
+        )
+        cites = _cites(text)
+
+        assert cites[0]["pincite"] is None
+
+    def test_intervening_prose_blocks_attachment(self):
+        """Within 80 chars but across real prose (not commas/'at'), no attach."""
+        cites = _cites("the '642 patent was filed before the deadline of 5:12")
+
+        assert cites[0]["pincite"] is None
+
+    def test_section_symbol_flags_ambiguous(self):
+        """An in-window match adjacent to '§' attaches but is flagged."""
+        cites = _cites("the '642 patent, § 5:12")
+
+        assert cites[0]["pincite"] is not None
+        assert "ambiguous_pincite" in cites[0]["flags"]
+
+    def test_timestamp_not_a_pincite(self):
+        """'at 9:30 a.m.' near a citation is rejected (a.m./p.m. signal)."""
+        cites = _cites("the '642 patent, at 9:30 a.m.")
+
+        assert cites[0]["pincite"] is None
+
+
+class TestParagraphPincites:
+    """App-pub paragraph pincites."""
+
+    def test_pilcrow_bracket_form(self):
+        """'¶ [0042]' attaches as a paragraph pincite."""
+        cites = _cites("U.S. Patent Application Pub. No. 2009/0151718 ¶ [0042].")
+
+        assert cites[0]["pincite"] == {"kind": "paragraph", "paragraph": 42}
+
+    def test_para_abbreviation(self):
+        """'para. 0042' attaches."""
+        cites = _cites("the '718 publication at para. 0042")
+
+        assert cites[0]["pincite"] == {"kind": "paragraph", "paragraph": 42}
+
+    def test_spelled_paragraph(self):
+        """'paragraph 42' attaches."""
+        cites = _cites("the '718 publication at paragraph 42")
+
+        assert cites[0]["pincite"] == {"kind": "paragraph", "paragraph": 42}
+
+
+class TestClaimPincites:
+    """Claim references: attached backward, attached forward, or standalone."""
+
+    def test_claims_attach_in_window(self):
+        """'the '642 patent, claims 1-3' attaches a claims pincite."""
+        cites = _cites("the '642 patent, claims 1-3")
+
+        assert cites[0]["pincite"] == {
+            "kind": "claims", "start_claim": 1, "end_claim": 3,
+        }
+
+    def test_claim_of_citation_attaches_forward(self):
+        """'claim 1 of the '642 patent' attaches to the FOLLOWING citation."""
+        cites = _cites("Defendant infringes claim 1 of the '642 patent.")
+
+        assert len(cites) == 1
+        assert cites[0]["citation_type"] == "patent_short"
+        assert cites[0]["pincite"] == {
+            "kind": "claims", "start_claim": 1, "end_claim": 1,
+        }
+
+    def test_standalone_claim_becomes_patent_claim_entry(self):
+        """A claim ref with no adjacent citation is a standalone entry."""
+        text = "U.S. Patent No. 8,453,642 is asserted. Claim 9 recites a vent."
+        cites = _cites(text)
+
+        assert len(cites) == 2
+        standalone = cites[1]
+        assert standalone["citation_type"] == "patent_claim"
+        assert standalone["ref"] is None
+        assert standalone["pincite"] == {
+            "kind": "claims", "start_claim": 9, "end_claim": 9,
+        }
+        start, end = standalone["span"]
+        assert text[start:end] == "Claim 9"
+
+    def test_claim_number_in_plain_prose_without_any_patent(self):
+        """Standalone claim entries are still emitted without a stack —
+        resolution (and flagging) is Phase 4's job."""
+        cites = _cites("Claim 1 was amended during prosecution.")
+
+        assert len(cites) == 1
+        assert cites[0]["citation_type"] == "patent_claim"

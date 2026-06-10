@@ -166,6 +166,180 @@ NICKNAME_MAX_GAP = 20
 _NUM_ITER_RE = re.compile(rf"{_NUM}")
 
 
+# ---------------------------------------------------------------------------
+# Pincite grammar + proximity gating (Functional Core)
+# ---------------------------------------------------------------------------
+
+# A pincite is accepted only inside the proximity window after a citation:
+# at most PINCITE_WINDOW_CHARS chars, and the text between citation end and
+# pincite start may cross only whitespace, commas, and the word "at".
+PINCITE_WINDOW_CHARS = 80
+_CONNECTOR_RE = re.compile(r"^[\s,]*(?:at\s+)?[\s,]*$")
+# Compact N:M only: the connector may additionally carry a '§' — that match
+# is still accepted but flagged ambiguous_pincite (the '§' suggests the N:M
+# may be a statute/rule section, not a column:line). Without this relaxed
+# variant the ambiguity branch would be unreachable: a '§' prefix would
+# always fail _CONNECTOR_RE and the match would be silently dropped.
+_COMPACT_CONNECTOR_RE = re.compile(r"^[\s,]*(?:at\s+)?[\s,]*(?:§\s*)?$")
+
+COL_LINE_EXPLICIT_RE = re.compile(
+    r"col(?:umn)?s?\.?\s*(?P<c1>\d{1,2}),?\s*"
+    r"(?:l(?:ine)?s?\.?|ll\.?)\s*(?P<l1>\d{1,3})"
+    r"(?:\s*-\s*(?P<l2>\d{1,3}))?"
+    r"(?:\s*(?:to|through)\s*col(?:umn)?\.?\s*(?P<c2>\d{1,2}),?\s*"
+    r"(?:l(?:ine)?s?\.?|ll\.?)\s*(?P<l3>\d{1,3}))?",
+    re.IGNORECASE,
+)
+
+# Compact N:M, optional range, optional cross-column "4:65-5:3".
+COL_LINE_COMPACT_RE = re.compile(
+    r"(?P<c1>\d{1,2}):(?P<l1>\d{1,3})"
+    r"(?:\s*-\s*(?:(?P<c2>\d{1,2}):)?(?P<l2>\d{1,3}))?"
+)
+
+PARAGRAPH_RE = re.compile(
+    r"(?:¶{1,2}|paras?\.?|paragraphs?)\s*\[?0*(?P<p>\d{1,4})\]?"
+    r"|\[(?P<pb>\d{4})\]",
+    re.IGNORECASE,
+)
+
+CLAIMS_RE = re.compile(
+    r"\b[Cc]laims?\s+(?P<a>\d{1,3})(?:\s*-\s*(?P<b>\d{1,3}))?"
+)
+
+# Signals that an in-window compact match may not be a column:line cite.
+_AMBIGUITY_SIGNAL_RE = re.compile(r"§")
+_TIME_SIGNAL_RE = re.compile(r"^\s*[ap]\.?m\.?", re.IGNORECASE)
+
+
+def _column_line_pincite(c1: int, l1: int, c2: int | None, l2: int | None) -> dict:
+    end_col = c2 if c2 is not None else c1
+    end_line = l2 if l2 is not None else l1
+    return {
+        "kind": "column_line",
+        "start_column": c1, "start_line": l1,
+        "end_column": end_col, "end_line": end_line,
+    }
+
+
+def _match_pincite_in_window(window: str) -> tuple[dict, int, int, list[str]] | None:
+    """Try the pincite grammars against a proximity window.
+
+    Returns (pincite, match_start, match_end, flags) for the first accepted
+    match, or None. Offsets are relative to the window.
+    """
+    # 1. Explicit col/line (most specific, includes cross-column "to col.").
+    for m in COL_LINE_EXPLICIT_RE.finditer(window):
+        if not _CONNECTOR_RE.match(window[:m.start()]):
+            continue
+        c2 = int(m.group("c2")) if m.group("c2") else None
+        l2 = int(m.group("l3")) if m.group("l3") else (
+            int(m.group("l2")) if m.group("l2") else None)
+        pin = _column_line_pincite(int(m.group("c1")), int(m.group("l1")), c2, l2)
+        return pin, m.start(), m.end(), []
+
+    # 2. Paragraph (apppub form).
+    for m in PARAGRAPH_RE.finditer(window):
+        if not _CONNECTOR_RE.match(window[:m.start()]):
+            continue
+        digits = m.group("p") or m.group("pb")
+        return {"kind": "paragraph", "paragraph": int(digits)}, m.start(), m.end(), []
+
+    # 3. Claims following the citation ("the '642 patent, claims 1-3").
+    for m in CLAIMS_RE.finditer(window):
+        if not _CONNECTOR_RE.match(window[:m.start()]):
+            continue
+        a = int(m.group("a"))
+        b = int(m.group("b")) if m.group("b") else a
+        return {"kind": "claims", "start_claim": a, "end_claim": b}, m.start(), m.end(), []
+
+    # 4. Compact N:M — most false-positive-prone, tried last and guarded.
+    for m in COL_LINE_COMPACT_RE.finditer(window):
+        connector = window[:m.start()]
+        if not _COMPACT_CONNECTOR_RE.match(connector):
+            continue
+        if _TIME_SIGNAL_RE.match(window[m.end():]):
+            continue  # "9:30 a.m." — a time, not a pincite
+        flags: list[str] = []
+        if _AMBIGUITY_SIGNAL_RE.search(connector):
+            flags.append("ambiguous_pincite")
+        c2 = int(m.group("c2")) if m.group("c2") else None
+        l2 = int(m.group("l2")) if m.group("l2") else None
+        pin = _column_line_pincite(int(m.group("c1")), int(m.group("l1")), c2, l2)
+        return pin, m.start(), m.end(), flags
+
+    return None
+
+
+# "claim 1 of the '642 patent" — claims that precede their citation.
+_CLAIM_OF_GAP_CHARS = 8  # covers " of " plus stray spaces/commas
+
+
+def _attach_pincites(text: str, citations: list[PatentCitation]) -> list[tuple[int, int]]:
+    """Attach in-window pincites to citations (mutates in place).
+
+    Returns the absolute spans of claim matches that were consumed by
+    attachment, so the standalone-claims pass can skip them.
+    """
+    consumed_claims: list[tuple[int, int]] = []
+
+    # Forward attachment: "claim 1 of <citation>".
+    for cit in citations:
+        start = cit["span"][0]
+        lead = text[max(0, start - 40):start]
+        m = None
+        for cand in CLAIMS_RE.finditer(lead):
+            m = cand  # keep the last (closest) one
+        if m is not None:
+            between = lead[m.end():]
+            if re.fullmatch(r"\s+of\s+", between) and len(between) <= _CLAIM_OF_GAP_CHARS:
+                a = int(m.group("a"))
+                b = int(m.group("b")) if m.group("b") else a
+                cit["pincite"] = {"kind": "claims", "start_claim": a, "end_claim": b}
+                abs_start = max(0, start - 40) + m.start()
+                consumed_claims.append((abs_start, abs_start + (m.end() - m.start())))
+                continue
+
+    # Backward attachment: pincite in the window after the citation.
+    for cit in citations:
+        if cit["pincite"] is not None:
+            continue
+        end = cit["span"][1]
+        window = text[end:end + PINCITE_WINDOW_CHARS]
+        hit = _match_pincite_in_window(window)
+        if hit is None:
+            continue
+        pin, m_start, m_end, flags = hit
+        cit["pincite"] = pin
+        cit["flags"].extend(f for f in flags if f not in cit["flags"])
+        if pin["kind"] == "claims":
+            consumed_claims.append((end + m_start, end + m_end))
+
+    return consumed_claims
+
+
+def _standalone_claims(
+    text: str,
+    citations: list[PatentCitation],
+    consumed_claims: list[tuple[int, int]],
+) -> list[PatentCitation]:
+    """Emit patent_claim entries for claim refs not attached to any citation."""
+    out: list[PatentCitation] = []
+    for m in CLAIMS_RE.finditer(text):
+        span = (m.start(), m.end())
+        if any(cs <= span[0] and span[1] <= ce for cs, ce in consumed_claims):
+            continue
+        # Inside an existing citation span (e.g., matched text) — skip.
+        if any(c["span"][0] <= span[0] < c["span"][1] for c in citations):
+            continue
+        a = int(m.group("a"))
+        b = int(m.group("b")) if m.group("b") else a
+        cit = _make_citation("patent_claim", text[span[0]:span[1]], span, None)
+        cit["pincite"] = {"kind": "claims", "start_claim": a, "end_claim": b}
+        out.append(cit)
+    return out
+
+
 def _normalize_number(number: str) -> str:
     """Remove whitespace after comma groups before handing a matched number
     to parse_patent_ref. A soft line break inside a number ("8,453,\\n642")
@@ -299,7 +473,12 @@ def get_patent_citations(text: str) -> list[PatentCitation]:
             ns <= s and e <= ne for ns, ne in nickname_spans
         )
 
-    return [c for c in citations if not _inside_nickname(c)]
+    citations = [c for c in citations if not _inside_nickname(c)]
+
+    consumed_claims = _attach_pincites(text, citations)
+    citations.extend(_standalone_claims(text, citations, consumed_claims))
+    citations.sort(key=lambda c: c["span"][0])
+    return citations
 
 
 # ---------------------------------------------------------------------------
