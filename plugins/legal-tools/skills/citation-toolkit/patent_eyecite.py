@@ -56,7 +56,7 @@ import argparse
 import json
 import re
 import sys
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from patent_ref import parse_patent_ref
 
@@ -71,6 +71,7 @@ class PatentCitation(TypedDict):
     nickname: str | None        # from a nickname parenthetical
     resolved_to: dict | None    # {"index": int, "full_citation": str}
     flags: list[str]            # unresolved_short_form, ambiguous_pincite, needs_metadata
+    candidates: NotRequired[list[int]]  # indices of ambiguous resolutions (unresolved only)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +168,12 @@ NICKNAME_MAX_GAP = 20
 # this is used with .match(text, pos), and ^ would still bind to string
 # start, never matching at pos > 0. .match() itself anchors at pos.
 INVENTOR_INTRO_RE = re.compile(r"\s+to\s+(?P<name>[A-Z][a-zA-Z]+)\b")
+
+# Corporate markers that follow an assignee name (must NOT register as inventor).
+_CORPORATE_MARKERS = frozenset({
+    "Inc", "Inc.", "Corp", "Corp.", "Corporation", "LLC", "L.L.C.", "Co", "Co.",
+    "Ltd", "Ltd.", "Limited", "AG", "plc", "NV", "GmbH", "Sàrl", "Oy",
+})
 
 # Single-number iterator used to expand "Nos." lists.
 _NUM_ITER_RE = re.compile(rf"{_NUM}")
@@ -433,13 +440,25 @@ def _attach_nickname(text: str, citation: PatentCitation) -> None:
 
 def _attach_inventor_intro(text: str, citation: PatentCitation) -> None:
     """If the long form is followed by 'to <Surname>', record it as an
-    inventor nickname (unless a parenthetical nickname already attached)."""
+    inventor nickname (unless a parenthetical nickname already attached).
+    Only registers single-token names NOT followed by corporate markers."""
     if citation["nickname"] is not None:
         return
     end = citation["span"][1]
     m = INVENTOR_INTRO_RE.match(text, end)
     if m is not None and m.group("name") not in _NOT_INVENTOR_NAMES:
-        citation["nickname"] = f"the {m.group('name')} patent"
+        # Check if name is followed by a corporate marker (e.g., "Sony Corporation").
+        # If so, skip registration — it's a corporate assignee, not an inventor.
+        name = m.group("name")
+        # m.end() gives absolute position after the matched name
+        peek_text = text[m.end():m.end() + 30]
+        # Look for whitespace followed by a corporate marker word
+        marker_match = re.match(r"^\s+([A-Za-z.]+)", peek_text)
+        if marker_match:
+            potential_marker = marker_match.group(1)
+            if potential_marker in _CORPORATE_MARKERS:
+                return  # Don't register; it's a corporate assignee
+        citation["nickname"] = f"the {name} patent"
 
 
 def _record_nickname(text: str, citation: PatentCitation, nickname_spans: list) -> None:
@@ -500,7 +519,7 @@ def _distinct_candidates(matches: list[dict]) -> list[dict]:
 
 def _mark_unresolved(citation: PatentCitation, candidates: list[dict]) -> None:
     citation["flags"].append("unresolved_short_form")
-    citation["candidates"] = [e["index"] for e in candidates]  # type: ignore[typeddict-unknown-key]
+    citation["candidates"] = [e["index"] for e in candidates]
 
 
 def resolve_patent_citations(citations: list[PatentCitation]) -> list[PatentCitation]:

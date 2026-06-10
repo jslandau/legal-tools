@@ -614,6 +614,31 @@ class TestInventorNameResolution:
 
         assert cites[1]["resolved_to"]["index"] == 0
 
+    def test_to_corporate_assignee_does_not_register_nickname(self):
+        """'Patent No. X to Sony Corporation' should NOT register a nickname
+        because 'Sony' is followed by a corporate marker (Corporation, Inc, etc).
+        This ensures 'the Sony patent' remains unresolved."""
+        cites = _cites(
+            "U.S. Patent No. 8,453,642 to Sony Corporation discloses a mask. "
+            "The Sony patent requires a vent."
+        )
+
+        # The long form should NOT have a nickname set
+        assert cites[0]["nickname"] is None
+        # The short form "the Sony patent" should not resolve (no inventor intro)
+        assert cites[1]["citation_type"] == "patent_short"
+
+    def test_to_single_word_inventor_does_register_nickname(self):
+        """'Patent No. X to Kwok' (single word, no corporate marker) DOES
+        register a nickname so 'the Kwok patent' can resolve."""
+        cites = _cites(
+            "U.S. Patent No. 8,453,642 to Kwok discloses a mask. "
+            "The Kwok patent requires a vent."
+        )
+
+        # The long form SHOULD have a nickname from the "to Kwok" intro
+        assert cites[0]["nickname"] == "the Kwok patent"
+
     def test_unintroduced_inventor_name_needs_metadata(self):
         """A name never introduced in text → unresolved + needs_metadata."""
         cites = _resolved(
