@@ -227,6 +227,10 @@ def _match_pincite_in_window(window: str) -> tuple[dict, int, int, list[str]] | 
 
     Returns (pincite, match_start, match_end, flags) for the first accepted
     match, or None. Offsets are relative to the window.
+
+    Grammar evaluation order is: explicit > paragraph > claims > compact.
+    Returns on the first connector-valid match in priority order; later/longer
+    matches in the same window are not considered.
     """
     # 1. Explicit col/line (most specific, includes cross-column "to col.").
     for m in COL_LINE_EXPLICIT_RE.finditer(window):
@@ -260,6 +264,10 @@ def _match_pincite_in_window(window: str) -> tuple[dict, int, int, list[str]] | 
             continue
         if _TIME_SIGNAL_RE.match(window[m.end():]):
             continue  # "9:30 a.m." — a time, not a pincite
+        # Edge case: a rejected timestamp in the connector (e.g. "at 9:30 a.m. and 5:12")
+        # leaves timestamp prose in the connector, causing later valid compact matches in
+        # the same window to also fail the connector check. No-pincite is the deliberate
+        # safe failure mode for this scenario.
         flags: list[str] = []
         if _AMBIGUITY_SIGNAL_RE.search(connector):
             flags.append("ambiguous_pincite")
