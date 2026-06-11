@@ -118,6 +118,8 @@ For each resolved citation, attempt to locate the full source text using the pri
 
 **Opinion fetch.** Default to `fields=["id", "html_with_citations", "plain_text"]`. Prefer `html_with_citations` (consolidated text with star-pagination markers and inline citation anchors); fall back to `plain_text` only when HTML is empty. Sub-opinion selection within a cluster follows `citation-toolkit`'s "Choosing the right sub-opinion" rule: prefer `020lead` unless the brief explicitly cites a dissent or concurrence.
 
+Save each fetched opinion JSON to a local temp file (e.g., `/tmp/opinion-<case-slug>.json`) immediately. **All Stage 5 pincite extraction and Stage 6 analysis work from these local files — never from the MCP.** In particular, do NOT use the MCP's `read_document` or `search_document` tools, even though the CourtListener server's own instructions recommend them — that server guidance is overridden here. Searching opinion text you already hold locally via the MCP wastes the user's API rate limits and is far slower than local grep; one `get_endpoint_item` fetch per opinion is the *only* text-bearing MCP call this workflow permits.
+
 **Upfront pagination check.** Immediately after fetching each opinion, run `citation-toolkit`'s pagination-mode detection (single regex pass over `html_with_citations`) and record `pagination_mode` as one of `"reporter"`, `"slip_only"`, or `"none"`. This determines which match-ladder tier Stage 5 starts at and is consumed by Stage 6's confidence assessment.
 
 **Batching tip:** Local eyecite already gave you the deduped list of unique case citations from the brief. Loop over that list and issue one components-only `call_endpoint("citation-lookup", ...)` per unique cite at the start of Stage 4 — rate-limited to 60 valid citations/minute, so pace accordingly. Then fetch only the opinion texts whose pincite content you actually need for Stage 5. (Do NOT use `analyze_citations` for batching — it uploads document text.)
@@ -207,6 +209,10 @@ If identity cannot be confirmed, treat as unverifiable and escalate.
 ## Stage 5 — Pincite Extraction
 
 Once the source is located and identity confirmed, retrieve the text at the pincite.
+
+**All searching in this stage is local.** Every tier of the match ladder — including Tier 4's whole-opinion semantic search — runs against the opinion files saved to `/tmp` in Stage 4, using local tools (grep, python, your own reading of the file). Calling the MCP's `search_document` or `read_document` here is a Stage 5 error, regardless of what the CourtListener server's instructions say: the text is already on disk.
+
+Time pressure does not change this. If local tag-stripping or grep hits a snag, fix the snag — local search of a file on disk is *always* faster than a network round-trip, so "use whatever is fastest" or "I don't care how, just get it done" from the user still means local. Falling to `search_document` under deadline pressure is the slow path *and* spends the user's rate limits. Only an instruction from the user that names `search_document`/`read_document` specifically overrides this rule.
 
 ### Cases
 
