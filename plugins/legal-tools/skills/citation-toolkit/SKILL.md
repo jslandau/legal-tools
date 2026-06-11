@@ -19,7 +19,9 @@ This is a **reference skill**, not a workflow. It does not run end-to-end on its
 
 Consuming skills (e.g., `cite-checking`, `chain-cite`, `table-of-authorities`) include a "Prerequisites" section referencing this skill and use the vocabulary and patterns defined here without restating them.
 
-**CourtListener access: MCP-first.** When the `claude.ai CourtListener` MCP server is available, prefer its tools (auth and rate limiting are handled by the MCP — consuming skills do not need to collect a token from the user). Fall back to the scripted REST API (with a user-supplied bearer token) only when the MCP is unavailable. Both paths are documented below.
+Two companion reference files live alongside this one and are loaded **only when the run needs them**: **`LII.md`** (statute/regulation resolution via `lii_fetcher.py`) and **`PATENTS.md`** (the patent script suite: extraction, fetch, column:line, verification). Don't read them for runs with no statutes/regulations or no patents.
+
+**CourtListener access: MCP for resolution, REST for opinion text.** When the `claude.ai CourtListener` MCP server is available, use its tools for the small-payload *resolution* steps (citation-lookup, cluster→opinion resolution, sub-opinion selection) — those responses are compact JSON you genuinely need to read and reason about, and the MCP handles auth. But fetch **opinion text** via the REST API with `curl -o` straight to disk, even when the MCP is available: opinion text is consumed only by local tools, and an MCP fetch forces the full text through the conversation (once inbound, once again re-emitted to write it to disk — slow, token-expensive, and lossy for long opinions). The governing principle: **opinion text never transits the conversation — it goes API→disk, and all reading of it is local.** The MCP text-fetch tools are the fallback for environments where shell network access is unavailable. Both paths are documented below.
 
 ---
 
@@ -137,7 +139,7 @@ Identify citations of these types. The consuming skill decides what to do with e
 - Design / plant / reissue grant: `D645,062` / `PP12,345` / `RE38,161` (letter prefix kept — it identifies the document)
 - Application publication: `U.S. Patent Application Pub. No. 2009/0151718 A1` (11-digit `YYYYNNNNNNN`; cited to paragraph `[0042]`, not column:line)
 - Provisional: `60/123,456` → not publicly retrievable; flag, do not fetch
-- Parsed by `patent_ref.py` into a `PatentRef` (see Structured Component Schemas). Patents are extracted by `patent_eyecite.py` (script section below); the LLM gap pass remains only as a recall backstop for informal references the regex finder cannot see (e.g., "the patent-in-suit").
+- Parsed by `patent_ref.py` into a `PatentRef` (see Structured Component Schemas). Patents are extracted by `patent_eyecite.py` (documented in `PATENTS.md` alongside this file); the LLM gap pass remains only as a recall backstop for informal references the regex finder cannot see (e.g., "the patent-in-suit").
 
 **Recognizing patent cites in text** (all extracted by `patent_eyecite.py`):
 - Long form, first mention: `U.S. Patent No. 8,453,642`, often with a parenthetical nickname `("the '642 patent")`.
@@ -326,7 +328,9 @@ When the `claude.ai CourtListener` MCP server is loaded, use these tools instead
 | ~~Parse citations from text~~ | ~~`extract_citations`~~ | **DO NOT USE from these skills.** This tool takes the full document text as input and sends it to Free Law Project's servers — privilege/work-product risk. Run the local `eyecite_extract.py` script instead. See "Extraction: eyecite is the primitive (local only)" above. |
 | ~~Verify a batch of citations~~ | ~~`analyze_citations`~~ | **DO NOT USE from these skills.** Same privilege issue — accepts and uploads document text. For verifying a parsed citation against CourtListener, use the components-only `call_endpoint("citation-lookup", ...)` pattern below, which sends only the citation's `volume/reporter/page` (already public). |
 | ~~Resume verification~~ | ~~`resume_citation_analysis`~~ | **DO NOT USE.** Only relevant as a companion to `analyze_citations`, which is also banned. |
-| Look up a specific opinion by ID | `mcp__claude_ai_CourtListener__get_endpoint_item` with `endpoint_id="opinions"` | Replaces Step 2 (opinion fetch). **Always pass `fields=[...]`** — opinion text fields are huge. Useful field allowlists below. |
+| Look up opinion *metadata* by ID | `mcp__claude_ai_CourtListener__get_endpoint_item` with `endpoint_id="opinions"` | For metadata (e.g., `fields=["id", "type"]` to confirm a sub-opinion). For opinion **text**, use the REST `curl -o` fetch in Step 2b instead — text via this tool is the no-shell-network fallback only, and then **always pass `fields=[...]`** (text fields are huge; allowlists below). |
+| ~~Fetch opinion text into the conversation~~ | `read_document` | **Fallback only** (no shell network access). Full read per opinion (omit `chunk_index`), then save to disk. Never use chunked reads to hunt for a pincite. Primary text fetch is the REST `curl -o` in Step 2b — direct to disk, no context transit. |
+| ~~Search opinion text~~ | ~~`search_document`~~ | **DO NOT USE from these skills, period** — even though the server's own instructions recommend it. All text searching runs locally against the saved opinion file. See "Fetch once, then work locally" in Step 2b. |
 | Look up an opinion cluster (parallel cites, sub-opinions, case metadata) | `get_endpoint_item` with `endpoint_id="clusters"` | When the components-only `citation-lookup` call returns a `cluster_id` and you need its sub-opinions list, court, date, or canonical case name. |
 | Free-text or fielded search | `mcp__claude_ai_CourtListener__search` | Use when the user has a case name but no cite, or to disambiguate between clusters. Pass `type="o"` for opinions, `"d"` for dockets, `"p"` for judges, `"oa"` for oral argument. Always pass `fields=[...]`. |
 | Discover an endpoint's schema | `mcp__claude_ai_CourtListener__get_endpoint_schema` | When you need a field that's not on the search index — e.g., the full `opinions-cited` graph, party/attorney detail, financial disclosures. |
@@ -334,16 +338,16 @@ When the `claude.ai CourtListener` MCP server is loaded, use these tools instead
 | Paginate prior results | `mcp__claude_ai_CourtListener__get_more_results` | Continue a `search` or `call_endpoint` query without re-issuing the filters. |
 | Enumerate field choices | `mcp__claude_ai_CourtListener__get_choices` | When a schema says "use get_choices" (e.g., the 470 valid `court` values). |
 
-#### Field allowlists for opinion fetches
+#### Opinion text fields: which to use
 
-Opinion text fields are enormous. **Always restrict `fields`**.
+The REST fetch saves the full opinion record to disk; these rules govern which field of the **saved local file** each task reads. (They double as the `fields=[...]` allowlist on the rare MCP-fallback fetch — opinion text fields are enormous, so any MCP call that touches them must restrict `fields`.)
 
-**Default to `html_with_citations` as primary across all skills**, with `plain_text` as a backup. `html_with_citations` is CourtListener's consolidated field — it includes the star-pagination markers AND the inline citation anchors AND the consolidated text, in one payload. `plain_text` is sometimes empty (especially for older or Harvard-CAP-only ingests), and when it is populated it does not always carry the same pagination scheme as `html_with_citations`. Request `html_with_citations` first; fall back to `plain_text` only when the HTML field is empty.
+**Default to `html_with_citations` as primary across all skills**, with `plain_text` as a backup. `html_with_citations` is CourtListener's consolidated field — it includes the star-pagination markers AND the inline citation anchors AND the consolidated text, in one payload. `plain_text` is sometimes empty (especially for older or Harvard-CAP-only ingests), and when it is populated it does not always carry the same pagination scheme as `html_with_citations`. Use `html_with_citations` first; fall back to `plain_text` only when the HTML field is empty.
 
-- **For proposition/pincite text searching (`cite-checking` Stage 5):** `["id", "html_with_citations", "plain_text"]`. Use `html_with_citations` after stripping tags; fall back to `plain_text` only if HTML is empty.
-- **For star-pagination / pincite page extraction (`chain-cite` Stage 3):** `["id", "html_with_citations"]`. Optionally also request `"xml_harvard"` if you anticipate ingestion-format-specific edge cases.
-- **For citation-graph traversal (`chain-cite` Stage 4):** `["id", "html_with_citations"]`. The anchors `<span class="citation" data-id="..."><a href="/opinion/{id}/...">` are what backward traversal walks.
-- **For identity verification only (case name + date + reporter):** fetch the cluster instead — `get_endpoint_item("clusters", id, fields=["id", "case_name", "date_filed", "citations", "sub_opinions"])`.
+- **For proposition/pincite text searching (`cite-checking` Stage 5):** `html_with_citations` after stripping tags; fall back to `plain_text` only if HTML is empty.
+- **For star-pagination / pincite page extraction (`chain-cite` Stage 3):** `html_with_citations`; `xml_harvard` is an additional pagination source for ingestion-format edge cases.
+- **For citation-graph traversal (`chain-cite` Stage 4):** `html_with_citations`. The anchors `<span class="citation" data-id="..."><a href="/opinion/{id}/...">` are what backward traversal walks.
+- **For identity verification only (case name + date + reporter):** no text fetch needed — use the cluster: `get_endpoint_item("clusters", id, fields=["id", "case_name", "date_filed", "citations", "sub_opinions"])`.
 
 #### Choosing the right sub-opinion within a cluster
 
@@ -417,7 +421,7 @@ This sends only the citation's public components (e.g., `volume=576&reporter=U.S
 
 For batches, loop over the unique citations from your local eyecite output and call this endpoint once per cite. Rate limit: 60 valid citations/minute — pace accordingly. **Do NOT use `analyze_citations` or pass document text to citation-lookup** even though the endpoint accepts a `text` parameter — those paths upload the full document.
 
-#### Step 2 (MCP) — Fetch the opinion text
+#### Step 2 — Resolve to an opinion ID (MCP) and fetch the text (REST)
 
 **Critical:** the citation-lookup response gives a **`Cluster ID`**, not an opinion ID. The `opinions` endpoint takes an opinion ID; passing a cluster ID will silently return whatever unrelated opinion happens to share that integer (or, for older single-opinion clusters, the correct opinion only by coincidence). You MUST resolve cluster → opinion first.
 
@@ -433,31 +437,26 @@ call_endpoint(
 
 The response's `sub_opinions` array contains one or more opinion URIs of the form `https://www.courtlistener.com/api/rest/v4/opinions/<opinion_id>/`. Pick the right one using the **Choosing the right sub-opinion within a cluster** guidance above (prefer `020lead`, then `010combined`, switching to dissent/concurrence only if the brief specifically cites one). You typically need to fetch each candidate sub-opinion to read its `type` field, since `call_endpoint("clusters", ...)` returns URIs, not the `type` value directly — fetch them one at a time until you find the one matching your selection rule.
 
-**Step 2b — Fetch the opinion text:**
+**Step 2b — Fetch the opinion text (REST, direct to disk):**
 
-Preferred: a single **full read** via `read_document` — it is cached server-side for 24 hours across all users (repeated fetches don't re-hit the API) and returns the opinion's `html_with_citations`:
+Opinion text is consumed only by local tools (grep, python), so it should never transit the conversation. Fetch it with `curl -o` straight to disk — **even when the MCP is available**:
 
-```
-read_document(opinion_id=<opinion_id_from_sub_opinions>)   # omit chunk_index → full document
-```
-
-It takes an **opinion ID** — the cluster→opinion resolution in Step 2a is still mandatory, and the cluster-as-opinion-ID hazard applies here identically. Because `read_document` returns only text, confirm the sub-opinion's `type` via the Step 2a metadata (or a fields-only `get_endpoint_item` with `fields=["id", "type"]`) before or after the read. **Save the returned text to a local temp file immediately** (e.g., `/tmp/opinion-<case-slug>.html`); the rest of the workflow operates on that file. Do NOT use chunked reads (`chunk_index`) to page around looking for a pincite — that is searching via the MCP; take the full document once.
-
-Fallback (e.g., `read_document` errors, or you also want `xml_harvard`): fetch the raw fields:
-
-```
-get_endpoint_item(
-  endpoint_id="opinions",
-  item_id=<opinion_id_from_sub_opinions>,
-  fields=["id", "type", "html_with_citations", "plain_text"],
-)
+```bash
+curl -s "https://www.courtlistener.com/api/rest/v4/opinions/<opinion_id>/" \
+  -o /tmp/opinion-<case-slug>.json
 ```
 
-Always include `"type"` in `fields` so you can confirm the sub-opinion is the one you intended.
+No token is needed by default — unauthenticated REST allows ~100 requests/day, ample for a typical brief's opinion fetches. If the run is large or CourtListener returns HTTP 429, ask the user for a free API token (courtlistener.com/sign-in/; authenticated: 5,000/hr) and add `--header "Authorization: Token [USER_TOKEN]"`.
+
+The endpoint takes an **opinion ID** — the cluster→opinion resolution in Step 2a is still mandatory, and the cluster-as-opinion-ID hazard applies here identically. The saved JSON carries `html_with_citations`, `plain_text`, `xml_harvard`, and `type` (confirm `type` matches the sub-opinion you intended).
+
+Why not the MCP for this step: any MCP tool result lands in the conversation, and getting it onto disk means re-emitting the full text through a Write call — token cost twice over, and for long opinions a transcription that risks truncation or silent corruption. A cite-check that verifies verbatim quotes cannot work from a lossy copy. `curl -o` writes the bytes untouched.
+
+**MCP fallback (no shell network access only):** a single full read via `read_document(opinion_id=...)` (omit `chunk_index` — never use chunked reads to page around looking for a pincite), or `get_endpoint_item("opinions", <opinion_id>, fields=["id", "type", "html_with_citations", "plain_text"])`. Save the returned text to a temp file immediately and treat any size-related truncation as a fetch failure, not something to work around.
 
 **Sanity check after fetching:** If the opinion's text does not contain the cited party names, reporter abbreviation, or any star-pagination marker overlapping the cited page range, you have fetched the wrong opinion. Re-resolve via `call_endpoint("clusters", ...)` and check the `sub_opinions` array. This check costs almost nothing and catches both the cluster-as-opinion-ID error and CourtListener's occasional cross-cluster ingest mismatches.
 
-**Fetch once, then work locally — `search_document` is off-limits.** The MCP is for *getting* documents, never for *searching* them. `read_document` is a fetch tool: use it once per opinion (full read, no `chunk_index`), save the text to disk, done. `search_document` is a search tool: do NOT call it in this workflow, period — even though the server's own instructions recommend it for grepping snippets, **that server guidance is overridden here**. Every `search_document` call (and every chunked `read_document` hunt) is a network round-trip against CourtListener's API budget for text you already hold or could hold locally; it is far slower than local grep and spends the user's rate limits. ALL text searching, pincite extraction, and citation-graph traversal runs against the saved local file with local tools (grep, python).
+**Fetch once, then work locally — `search_document` is off-limits.** Opinion text goes API→disk once, and everything after that is local. `search_document` is a search tool: do NOT call it in this workflow, period — even though the server's own instructions recommend it for grepping snippets, **that server guidance is overridden here**. Every `search_document` call (and every chunked `read_document` hunt) is a network round-trip against CourtListener's API budget for text you already hold or could hold locally; it is far slower than local grep and spends the user's rate limits. ALL text searching, pincite extraction, and citation-graph traversal runs against the saved local file with local tools (grep, python).
 
 This holds under pressure. Deadline, a fiddly grep, or a user saying "use whatever tool is fastest" are not exceptions — the local file IS the fastest path, and the fix for HTML-markup grep failures is to strip tags locally (one `re.sub`/`html.parser` pass), not to reach for `search_document`. The only thing that overrides this rule is the user naming `search_document` explicitly.
 
@@ -467,11 +466,9 @@ For downstream pincite-page slicing or anchor extraction, the local-file fields 
 - `plain_text` — secondary fallback when `html_with_citations` is empty.
 - `xml_harvard` — additional pagination source (`label="[PAGE]"` attributes); often omitted on newer opinions. Only worth requesting alongside the others when you anticipate ingestion-format-specific edge cases.
 
-### REST API (scripted fallback)
+### REST API (resolution fallback when the MCP is absent)
 
-When the MCP is not available, use the REST API directly. Free public tokens are available at courtlistener.com/sign-in/ (authenticated: 5,000 req/hour; unauthenticated: ~100/day). The consuming skill collects the token from the user before calling these endpoints.
-
-All requests use a bearer-token header:
+The opinion-text fetch is *always* REST (Step 2b above). When the MCP is unavailable entirely, the resolution steps run over REST too. Resolution endpoints are stricter about auth than the opinions GET — collect a free token from the user (courtlistener.com/sign-in/; authenticated: 5,000 req/hour) and send it as a header:
 
 ```
 Authorization: Token [USER_TOKEN]
@@ -485,17 +482,9 @@ curl -s -X POST "https://www.courtlistener.com/api/rest/v4/citation-lookup/" \
   --data "volume=[VOL]&reporter=[REPORTER]&page=[PAGE]"
 ```
 
-Returns a `clusters` array. Identify the correct cluster by matching `case_name`, `date_filed`, and `citations`. The `sub_opinions` field contains an array of opinion URIs — extract the numeric **opinion ID** from one of these URIs (NOT the cluster's own `id`, which is different) using the sub-opinion selection guidance above. The opinion ID is what Step 2 needs.
+Returns a `clusters` array. Identify the correct cluster by matching `case_name`, `date_filed`, and `citations`. The `sub_opinions` field contains an array of opinion URIs — extract the numeric **opinion ID** from one of these URIs (NOT the cluster's own `id`, which is different) using the sub-opinion selection guidance above. The opinion ID is what Step 2b needs.
 
-**Step 2 — Fetch the opinion text**
-
-```bash
-curl -s "https://www.courtlistener.com/api/rest/v4/opinions/[OPINION_ID]/" \
-  --header "Authorization: Token [USER_TOKEN]" \
-  -o /tmp/opinion-[CASE-SLUG].json
-```
-
-Work from the local file for all subsequent pincite extraction and citation-graph traversal. Field semantics (`plain_text`, `xml_harvard`, `html_with_citations`) are identical to the MCP path documented above.
+**Step 2 — Fetch the opinion text:** identical to Step 2b above (`curl -o /tmp/opinion-[CASE-SLUG].json`); add the token header if you collected one. Work from the local file for all subsequent pincite extraction and citation-graph traversal.
 
 ### Identity verification
 
@@ -519,7 +508,7 @@ After exhausting this chain, consuming skills ask the user directly; if the user
 
 ### Non-case US sources
 
-For statutes (U.S.C.) and federal regulations (C.F.R.), the primary source is **Cornell LII**, fetched and parsed via the `lii_fetcher.py` script in this skill's directory. See the "LII source resolution" section below for the full pattern. Other source types (Federal Rules, secondary sources, treatises, legislative materials) are outside both CourtListener's and the LII script's scope; consuming skills use the source-specific lookup lists in their own Stage 4 (SSRN / direct law review sites for articles, Google Books for treatises, Congress.gov for legislative materials, etc.).
+For statutes (U.S.C.) and federal regulations (C.F.R.), the primary source is **Cornell LII**, fetched and parsed via the `lii_fetcher.py` script in this skill's directory. See `LII.md` alongside this file for the full pattern. Other source types (Federal Rules, secondary sources, treatises, legislative materials) are outside both CourtListener's and the LII script's scope; consuming skills use the source-specific lookup lists in their own Stage 4 (SSRN / direct law review sites for articles, Google Books for treatises, Congress.gov for legislative materials, etc.).
 
 ### EU / international
 
@@ -529,263 +518,22 @@ EUR-Lex for Court of Justice and EU secondary materials; HUDOC for European Cour
 
 ## LII source resolution (U.S.C. and C.F.R.)
 
-US statutes and federal regulations are resolved through **Cornell LII** via the `lii_fetcher.py` script in this skill's directory. Like `eyecite_extract.py`, it is invoked as a subprocess, reads JSON on stdin (or `--input`), and writes JSON on stdout — one batch per run, not one call per citation.
-
-### What it handles
-
-- **Statutes**: `[title] U.S.C. § [section]` → `https://www.law.cornell.edu/uscode/text/{title}/{section}`
-- **Regulations**: `[title] C.F.R. § [section]` → `https://www.law.cornell.edu/cfr/text/{title}/{section}` (where `section` includes the part, e.g., `201.6`)
-
-Federal Rules (FRCP/FRAP/FRE) are **not** covered by this script yet. Use the existing case-side escalation pattern for those until they're wired through.
-
-### Subsection anchors
-
-LII tags subsections with one of two markup conventions, both keyed by the same anchor scheme:
-
-- **U.S.C.**: `<a name="X"></a>` inside a `<div class="subsection|paragraph indentN">` container.
-- **C.F.R.**: `<span class="enumxml" id="X">(X)</span>` inside a `<p class="psection-N">` container.
-
-`X` is the subsection name with parens stripped and levels joined by underscores, preserving case: `(c)(2)` → `c_2`; `(b)(2)(C)(i)` → `b_2_C_i`. The script computes this from the Bluebook-style `subsection` field on the input entry. Single-level inputs that already look like anchors (e.g., `c_2`) are passed through unchanged.
-
-### No fallback
-
-If LII returns 404, or returns 200 with an empty section body (LII serves chrome-only pages for reserved or missing CFR sections), the script marks the entry `not_found`. There is no Wayback / archive fallback wired up: LII has been stable for decades, so a failure is more likely to indicate a bad citation or a network problem than a transient outage. The consuming skill escalates to the user and, failing that, marks `unverifiable`.
-
-LII's CFR coverage in particular is patchy — some sections are reserved, some have content but no anchor for every subsection. A `subsection_anchor_not_found` result is **deliberately a false negative**: the script does not attempt to slice the section text heuristically when the anchor is absent, because that would silently substitute the wrong passage. The consuming skill should ask the user to confirm or mark `unverifiable`.
-
-### Input shape
-
-```json
-[
-  {"id": "c1", "type": "statute",    "title": "17", "section": "512",   "subsection": "(c)(2)"},
-  {"id": "c2", "type": "regulation", "title": "29", "section": "1910.95","subsection": "(b)(1)"}
-]
-```
-
-- `id`: opaque caller identifier; echoed back in the output.
-- `type`: `"statute"` or `"regulation"`.
-- `title`: title number (string or int).
-- `section`: section identifier. For C.F.R., include the part (e.g., `"201.6"`, not `"6"`).
-- `subsection`: Bluebook-style (`"(c)(2)"`), pre-computed anchor (`"c_2"`), or null/missing.
-
-### Output shape
-
-Same order as input. Per-entry fields:
-
-```json
-{
-  "id": "c1",
-  "status": "ok",                     // ok | anchor_not_found | not_found | network_error
-  "url": "https://www.law.cornell.edu/uscode/text/17/512",
-  "anchor": "c_2",
-  "anchor_matched": true,
-  "section_text": "...full § 512 text with tags stripped...",
-  "subsection_text": "...just (c)(2)...",
-  "retrieved_at": "YYYY-MM-DDTHH:MM:SSZ",
-  "flags": []
-}
-```
-
-Status semantics:
-- `ok`: section fetched, and if a subsection was requested, its anchor was located and its text extracted.
-- `anchor_not_found`: section fetched but the requested subsection anchor isn't in the page. `section_text` is populated; `subsection_text` is null. Flag `subsection_anchor_not_found`.
-- `not_found`: LII returned 404 *or* served a chrome-only empty body. Flag `source_not_found`.
-- `network_error`: timeout, 5xx, DNS, etc. `error` field carries a short description. The consuming skill decides whether to retry.
-
-### Invocation
-
-```bash
-python3 plugins/legal-tools/skills/citation-toolkit/lii_fetcher.py --input requests.json
-```
-
-Or via stdin. The script is stdlib-only — no `pip install` required.
+US statutes and federal regulations are resolved through **Cornell LII** via the `lii_fetcher.py` script in this skill's directory (batch JSON in/out; stdlib-only). Full documentation — anchor scheme, input/output shapes, status semantics, and the deliberate no-fallback rule — lives in **`LII.md`** alongside this file. Read it before invoking `lii_fetcher.py`.
 
 ---
+## Patent tooling
 
-## Extraction: `patent_eyecite.py`
-
-Extracts every patent citation from brief or document text — the patent sibling of `eyecite_extract.py`. Like eyecite, the tool extracts, parses, and resolves short forms in a single local pass. Document text never leaves the machine.
-
-### How to run patent_eyecite locally
-
-The script lives in this skill's directory: `patent_eyecite.py`. It reads from a file or stdin and emits a JSON array of toolkit-shaped patent citation entries on stdout.
-
-```bash
-python3 plugins/legal-tools/skills/citation-toolkit/patent_eyecite.py --input brief.txt
-# or:
-cat brief.txt | python3 plugins/legal-tools/skills/citation-toolkit/patent_eyecite.py
-```
-
-The script does not make any network calls. Default run is fully offline and stdlib-only (imports only `patent_ref.py`).
-
-### Sample output
-
-One entry per citation, document order:
-
-```json
-[
-  {
-    "citation_type": "patent",
-    "full_citation": "U.S. Patent No. 8,453,642",
-    "span": [120, 146],
-    "ref": {
-      "kind": "grant",
-      "canonical_number": "8453642",
-      "display": "U.S. Patent No. 8,453,642",
-      "fetchable": true,
-      "reason": null
-    },
-    "pincite": {
-      "kind": "column_line",
-      "start_column": 5,
-      "start_line": 12,
-      "end_column": 5,
-      "end_line": 18
-    },
-    "nickname": "the '642 patent",
-    "resolved_to": null,
-    "flags": []
-  }
-]
-```
-
-### Three-layer API
-
-The script's three public functions mirror eyecite's design:
-
-- **`clean_patent_text(text)`** → `str` — normalizes text for matching (curly quotes, dashes, newlines become their ASCII equivalents). Strictly 1:1 character replacement; spans computed on the cleaned text are valid in the original.
-- **`get_patent_citations(text)`** → `list` — finds all patent citations in cleaned text, parses them, and attaches pincites.
-- **`resolve_patent_citations(cites)`** → `list` — single forward pass filling `resolved_to` on short forms and standalone claims using a running stack. Unresolvable entries are flagged, never dropped.
-
-### Pincite gating contract
-
-Pincites attach only within approximately 80 characters after a citation, crossing only whitespace, commas, and the word "at". A bare `N:M` outside this window is never emitted. In-window compact matches carrying an adjacent `§` are flagged `ambiguous_pincite` (the `§` signals the `N:M` may be a statute section, not a column:line reference).
-
-### Flag vocabulary
-
-- **`unresolved_short_form`** — Could not link a short form (`'NNN` or inventor-name) to a full citation in the running stack. Includes a `candidates` list of entry indices where collisions occur, so the consuming skill can prompt the user.
-- **`ambiguous_pincite`** — Compact `N:M` match carries a `§` signal; the proximity gating accepted it but the brief's context is ambiguous.
-- **`needs_metadata`** — Inventor-name short form (`"the Kwok patent"`) was never introduced in preceding text. Re-run with `--resolve-metadata` to attempt network resolution.
-
-### Network opt-in: `--resolve-metadata`
-
-```bash
-python3 plugins/legal-tools/skills/citation-toolkit/patent_eyecite.py \
-  --input brief.txt \
-  --resolve-metadata \
-  --cache-dir ./patent_cache
-```
-
-Sends **patent numbers only** (never document text) to Google Patents to fetch inventor lists for any short form flagged `needs_metadata`. Uses `patent_fetch.py`'s caching to avoid redundant requests. The `--cache-dir` option specifies where to store cached HTML; defaults to `patent_fetch.py`'s `patent_cache/` directory.
-
----
-
-## Patent column:line extraction
-
-US patent documents cite column and line numbers — e.g., `4:32-38` means column 4, lines 32–38 — to pinpoint passages in their specification. This skill provides tools to extract, query, and verify these citations locally without leaving the machine.
-
-### Build phase: `patent_extract.py`
-
-The extraction script reads a patent PDF with an embedded text layer and produces a structured JSON artifact mapping every printed line to its `(column, line)` coordinates. The script is local-only — the PDF never leaves your machine.
-
-```bash
-python3 plugins/legal-tools/skills/citation-toolkit/patent_extract.py build --input US9154231.pdf --out us9.json
-```
-
-Output: a `PatentDoc` JSON artifact with `lines` (each tagged with `column`, `line`, `text`, `kind`, and `page_index`) and diagnostic `page_fits` (including per-page confidence signals like `max_marker_residual` and `signal` status). For high-confidence pages, `max_marker_residual` is `0` (perfect line alignment); pages flagged as non-body content have a residual of `−1`.
-
-**Dependency:** `pip install pdfplumber`. On PEP-668 systems (recent Linux distros), use a venv:
-```bash
-python3 -m venv .venv && .venv/bin/pip install pdfplumber
-.venv/bin/python plugins/legal-tools/skills/citation-toolkit/patent_extract.py build --input US9154231.pdf --out us9.json
-```
-
-### Query phase: `patent_query.py`
-
-Once you have an artifact, resolve column:line citations instantly using the query script — no PDF re-parsing, no network calls, pure local lookup. The query script supports single-line citations, same-column spans, and cross-column spans (reading across gutter boundaries).
-
-```bash
-# Single line
-python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 5:1
-
-# Same-column span (column 4, lines 32 through 38)
-python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 4:32-38
-
-# Cross-column span (column 4 line 65 through column 5 line 3)
-python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 4:65-5:3
-
-# Span with true blank line (rendered as blank in output)
-python3 plugins/legal-tools/skills/citation-toolkit/patent_query.py --artifact us9.json --cite 3:49-51
-```
-
-Output: the joined printed text for the requested span on stdout, with lines separated by newline. Cross-column citations read in document order: start column from start_line to its max_line, each intermediate column 1 to its max_line, then end column from 1 to end_line.
-
-**Line numbering truth model:** US patents number every physical line slot by a gutter grid — the printed margin numbers (multiples of 5) are authoritative anchors, and the grid pitch is the truth source. The text leading drifts from the grid over the course of a page (~0.33pt per line), so line numbers are assigned per-grid-slot, not per-text-row. Each slot in the extracted artifact carries a `kind` field classifying it:
-
-- `text` — a printed line with content (text is non-empty).
-- `blank` — a real printed empty line (e.g., the vertical gap around a centered heading); text is empty.
-- `spurious` — a grid slot the drifting text skipped (no actual line printed there); text is empty. Spurious slots appear when the text leading clusters and the gutter grid drifts below the actual printed lines.
-- `unknown` — a slot on a marker-less page (claims tail with no gutter numerals) where the kind cannot be reliably classified; text is empty (a printed line is emitted as `text`, never `unknown`). Emitted only by the marker-less extraction path.
-
-The artifact upholds the invariant `text != "" iff kind == "text"`: only `text` slots carry content; `blank`, `spurious`, and `unknown` slots all have empty text.
-
-**Query contract:** When you request a span `start_col:start_line`–`end_col:end_line`:
-
-- `text` slots are rendered at full content.
-- True `blank` slots (interior to the span, not at span edges) are rendered as empty lines, preserving the printed vertical structure.
-- `spurious` slots are skipped silently — bracketing `text` is contiguous and reads continuously.
-- **Ambiguity signal:** A span shorter than 5 lines (the `AMBIGUITY_MAX_SPAN` threshold), or a single cite (`cite_width=1`), that **touches** a `spurious` or `unknown` slot raises an `AmbiguousCiteError` (exit code 3). This signals that the grid is unreliable at that scale; the error still returns the likely-intended text (the consecutive physical lines from the start; for a single cite, both neighbors). The human can disambiguate by inspecting the PDF.
-- Spans of 5+ lines render normally without raising an ambiguity signal — at large scales, humans anchor visually, not by counting, so the signal is not useful.
-
-Exit codes: 0 (ok) / 1 (cite error: malformed, out of range, column absent) / 2 (missing artifact) / 3 (ambiguous cite: returned text but grid is unreliable).
-
-**Marker-less best-effort:** Claims tails (single-column pages at document end) often have no gutter numerals. The extraction allocates columns and emits printed lines as `kind=text`, filling the gaps between them with `kind=unknown` slots (empty text) where classification is uncertain. Numbering is borrowed-pitch best-effort (assuming the text leading continues at the observed average pitch). Text cites on marker-less pages can resolve, but an `unknown` slot signals lower confidence.
-
-**CLEAN/NOISY diagnostic:** Each column in the artifact is flagged `signal: "CLEAN"` or `signal: "NOISY"` in the `page_fits` metadata. This is a per-column quality flag that warns (to stderr during build) of possible OCR fragmentation (undue word clustering at one y-center). The flag is **diagnostic-only** — it does NOT change the emitted line kinds, numbering, or query behavior. (The original premise that NOISY columns warrant fallback blank-rendering did not reproduce on the production extraction path, which clusters words into one y-center per actual printed row. See the project memory `project_patent_noisy_gate_demoted`.)
-
-The query script is stdlib-only — no dependencies beyond Python 3.
-
-### Verify phase: `patent_verify.py`
-
-Querying returns the text *at* a cite. Verifying answers a different question: does a brief's quoted passage actually appear at (or near) the cite it claims? `patent_verify.py` supports an LLM-driven quote-location ladder — the script does the deterministic normalization and coordinate math; the model does the matching (it never sees the brief's quote, only blob text the script emits).
-
-It is a batch-JSON primitive like `patent_ref.py`/`patent_fetch.py`: a JSON array of request objects on `--input` (or stdin) → a JSON array of results on stdout, echoing each entry's `id` in order. Each entry carries a `mode` and its own `artifact_path` (loaded per entry; a missing or unreadable artifact yields a `status:"error"` result object, not a hard exit — only malformed top-level JSON input exits 2).
-
-```bash
-# emit: normalize the cited region into a clean blob the LLM can match against
-echo '[{"id":"e1","mode":"emit","artifact_path":"us9.json","cite":"5:1-10"}]' \
-  | python3 plugins/legal-tools/skills/citation-toolkit/patent_verify.py
-
-# resolve: locate a verbatim slice (copied from the emitted blob) back to a coordinate
-echo '[{"id":"r1","mode":"resolve","artifact_path":"us9.json","substring":"a widget that","within":"5:1-14","retried":false}]' \
-  | python3 plugins/legal-tools/skills/citation-toolkit/patent_verify.py
-```
-
-- **`emit`** returns `window_blob` (the cited region ±10% expanded) and `body_blob` (the whole specification), both newline-free, plus `cited_coord`, `window_coord_range`, and an `ambiguity` flag (set when the cited region touches a `spurious`/`unknown` slot — the grid drift signal from the query layer, here triggering a wider window rather than an error).
-- **`resolve`** takes a substring the LLM matched and returns `found_at` (a `c:l` or `sc:sl-ec:el` coordinate string) with `match_scope` (`"window"` or `"body"` — the tier the hit came from). It searches the window first, then the full body in a single call. Multiple hits return `ambiguous_match` (with a `retry` instruction, or — when `retried:true` — all hit coordinates), never a silent first-hit. The re-normalize guard is whitespace-only and case-exact: a whitespace slip still resolves, but a case difference does not (patents capitalize defined terms deliberately).
-
-The LLM-facing ladder that drives these two modes is documented in `cite-checking`'s Stage 5. `patent_verify.py` is stdlib-only and imports cite parsing / ambiguity detection from `patent_query.py` rather than reimplementing them.
-
-### Architecture
-
-The build-once/query-many split is intentional. The geometric complexity (gutter detection, line-model fitting, per-page marker-residual confidence) lives in `patent_extract.py`. The query and verify layers (`patent_query.py`, `patent_verify.py`) see only the finalized artifact — they are pure functions over JSON, suitable for downstream consumption by cite-check without exposing linemodel internals. `patent_query.py` resolves a cite to its text; `patent_verify.py` builds the normalized blobs and coordinate index that let an LLM confirm a brief's quote sits at the cite. Both reuse `patent_query`'s cite parsing and ambiguity detection rather than duplicating it.
-
-### Privacy and scope
-
-- **Local-only:** The PDF and extracted text never leave the machine. Both scripts run entirely offline.
-- **Confidence signals:** Each page's diagnostic includes `is_body` (boolean — is this a numbered column:line page whose text is extracted and which consumes column numbers), `flagged` (boolean — does the page warrant a human look) and `flag_reason` (string), plus the per-page `max_marker_residual` confidence metric. `is_body` and `flagged` are usually opposites, but a body page can be both (e.g. a gutter cross-check disagreement is extracted *and* surfaced for review). Use these to assess extraction confidence before relying on a document's citations.
-- **Page classification (voting rule):** A page is body text if it has a clean gutter line-model fit, OR both column-number headers, OR at least two of {≥2 gutter markers, ≥1 column header, ≥100 words}. This admits single-column **claims tails** — including very short ones with zero multiple-of-5 gutter line-numbers, where the gutter is recovered from the column-header midpoint. Marker-less columns emit `unknown` slots rather than guessing blanks.
-- **Citation recognition:** Patent-cite recognition is implemented by `patent_eyecite.py` (including the proximity-gated `4:32-38` pincite rules); cite-checking consumes its output.
+Patent citations are handled by four local scripts in this skill's directory: `patent_eyecite.py` (extraction + short-form resolution — the patent sibling of `eyecite_extract.py`), `patent_fetch.py` (PDF retrieval by public patent number), `patent_extract.py`/`patent_query.py` (column:line artifact build and lookup), and `patent_verify.py` (quote-location verification). All run locally; document text never leaves the machine. Full documentation — invocation, output shapes, the line-numbering truth model, the query contract, and the verify emit/resolve modes — lives in **`PATENTS.md`** alongside this file. Read it whenever a run contains patent citations. (The patent taxonomy, `'NNN`/inventor-name short forms, and the Patents structured-component schema remain in this file, above.)
 
 ---
 
 ## Model Tiers for Subtasks
 
-Consuming skills dispatch many small subtasks in the course of a run. To control cost, delegate each subtask to the cheapest model that can reliably do it. The guidance below is shared across all consumers (`cite-checking`, `chain-cite`, `table-of-authorities`). Skills may override in specific cases but should justify the override.
+Consuming skills dispatch many small subtasks in the course of a run. To control cost, delegate each subtask to the cheapest model that can reliably do it. Tier names (Haiku / Sonnet / Opus) refer to model families — resolve each to the newest available model in that family at run time rather than pinning a dated model ID. The guidance below is shared across all consumers (`cite-checking`, `chain-cite`, `table-of-authorities`). Skills may override in specific cases but should justify the override.
 
 ### Haiku — mechanical / pattern work
 
-Use Haiku (`claude-haiku-4-5-20251001`) for tasks that are deterministic or near-deterministic string/pattern manipulation:
+Use the current Haiku-tier model for tasks that are deterministic or near-deterministic string/pattern manipulation:
 
 - **Citation parsing into the structured component schemas** above (splitting `547 U.S. at 391` into volume/reporter/page; identifying `Fed. R. Civ. P. 56(a)` as rule_set + rule_number + subsection).
 - **Short-form resolution against a running citation stack** when the candidate set is small and the match is unambiguous (exact party-name match, exact reporter-volume-page match, unambiguous `Id.`). Escalate to Sonnet only when the toolkit's `unresolved_short_form` flag is about to be raised.
@@ -796,7 +544,7 @@ Use Haiku (`claude-haiku-4-5-20251001`) for tasks that are deterministic or near
 
 ### Sonnet — judgment and synthesis
 
-Use Sonnet (`claude-sonnet-4-6`) for tasks that require semantic reasoning, judgment against legal conventions, or synthesis across multiple inputs:
+Use the current Sonnet-tier model for tasks that require semantic reasoning, judgment against legal conventions, or synthesis across multiple inputs:
 
 - **Fuzzy / semantic proposition localization** when the quoted text in the brief is paraphrased, truncated, or uses a short form whose proposition must be re-extracted at the short-form location.
 - **Drift annotation** — judging whether a predecessor opinion broadens, narrows, or rephrases a proposition (the work that distinguished Hop 1 from Hop 2 in the chain-cite test).
@@ -808,7 +556,7 @@ Use Sonnet (`claude-sonnet-4-6`) for tasks that require semantic reasoning, judg
 
 ### Opus — reserve for orchestration and critics
 
-Use Opus (`claude-opus-4-7`) sparingly:
+Use the current Opus-tier model sparingly:
 
 - **The Stage 7 critic subagent in `cite-checking`** — by design this is an independent second opinion and should not be cost-matched to the primary analyzer.
 - **The optional summary critic pass in `chain-cite`** when enabled.

@@ -27,7 +27,7 @@ Collect four inputs from the user before running any API calls:
 
 2. **Seed citation** — the citation that supposedly supports the proposition. Parsed in Stage 2 using `citation-toolkit`'s Case schema. If the user provides a short form (`Id.`, `supra`), a statute, a rule, a regulation, or a non-US case, stop and explain: this PoC traces propositions through US case law only; those other categories either lack a usable citation graph or require sources outside CourtListener.
 
-3. **CourtListener access.** If the `claude.ai CourtListener` MCP server is available, no token is needed — Stage 2 and the per-hop fetches use the MCP directly. Otherwise, a CourtListener API token is required (free at courtlistener.com/sign-in/; authenticated accounts get 5,000 requests/hour).
+3. **CourtListener access.** If the `claude.ai CourtListener` MCP server is available, no token is needed up front — resolution runs via the MCP and per-hop opinion fetches use unauthenticated REST `curl` (~100 requests/day; note this bounds chain depth more tightly than the checkpoint cadence does). Ask for a free token (courtlistener.com/sign-in/; authenticated: 5,000/hr) when the MCP is unavailable, when sibling-tracing is on, or on HTTP 429.
 
 4. **Sibling-branch tracing** — when a hop encounters a string cite with multiple predecessors for the same proposition, how should chain-cite handle the siblings?
    - **Follow only the strongest-signal case** (default — typically the first in the string per Bluebook 1.4; siblings are still recorded in the hop's JSON entry as `also_cited_for_same_proposition` but not recursed into)
@@ -48,12 +48,7 @@ Validate the four inputs, abort-with-explanation on the out-of-scope cases liste
 
 ## Stage 2 — Seed Resolution
 
-Parse the seed citation using `citation-toolkit`'s Case schema. Resolve to an opinion using `citation-toolkit`'s **CourtListener API** section:
-
-- **MCP path (preferred):** look up the seed via the **components-only** citation-lookup call: `mcp__claude_ai_CourtListener__call_endpoint(endpoint_id="citation-lookup", method="POST", body={"volume": "<vol>", "reporter": "<reporter>", "page": "<page>"})`. The response gives you a **cluster ID**, not an opinion ID. Resolve to the correct sub-opinion via `mcp__claude_ai_CourtListener__call_endpoint(endpoint_id="clusters", query={"id": <cluster_id>})` → pick the right entry in `sub_opinions` (prefer `020lead`, fall back to `010combined`). Then fetch the opinion text via `mcp__claude_ai_CourtListener__get_endpoint_item(endpoint_id="opinions", item_id=<opinion_id>, fields=["id", "type", "html_with_citations", "plain_text"])`. **Never pass the cluster ID directly to `get_endpoint_item("opinions", ...)`** — it silently returns the wrong opinion. **Do NOT use `analyze_citations`** — it accepts a `text` parameter, and we keep the bright-line rule that no document text crosses the network. Write the returned JSON to a temp file (e.g., `/tmp/opinion-<id>.json`) — Stages 3–4 pass that path to `chain_hop.py`.
-- **Fallback (no MCP):** the equivalent curl POST to `/api/rest/v4/citation-lookup/` with `volume/reporter/page` and a user-supplied token, then `/api/rest/v4/opinions/<id>/` — both documented in `citation-toolkit`'s REST API section.
-
-**Sub-opinion selection.** When the cluster's `sub_opinions` array has more than one entry, apply the **Choosing the right sub-opinion** rule in `citation-toolkit`: prefer the `020lead` opinion unless the seed citation explicitly references a dissent or concurrence. The `020lead` sub-opinion typically carries reporter-pagination (`*N` markers) from the Harvard CAP ingest, which is what the match ladder relies on.
+Parse the seed citation using `citation-toolkit`'s Case schema. Resolve and fetch it by following `citation-toolkit`'s **CourtListener API** Steps 1–2 exactly — components-only `citation-lookup` (MCP when available, never `analyze_citations`), cluster→opinion-ID resolution with the sub-opinion rule (prefer `020lead`; it typically carries the reporter-pagination `*N` markers the match ladder relies on), then the **REST `curl -o` text fetch direct to disk**. Chain-cite-specific detail: save each opinion to `/tmp/opinion-<id>.json` — the REST `opinions/<id>/` response is exactly the JSON shape (`html_with_citations` et al.) that `chain_hop.py` reads in Stages 3–4.
 
 **Upfront pagination check.** After fetching, run `citation-toolkit`'s pagination-mode detection on the opinion's `html_with_citations`. Record `pagination_mode` on Hop 0 (and on every subsequent hop). When `pagination_mode != "reporter"`, the per-hop pincite-page slicing in Stage 3 will fall through to whole-opinion semantic search — flag the hop accordingly so the output report surfaces the localization uncertainty.
 
@@ -71,7 +66,7 @@ This skill ships with `chain_hop.py` alongside `SKILL.md`. It is the **mechanica
 
 Each hop is a four-step cycle:
 
-1. **Fetch the current hop's opinion JSON.** Use `mcp__claude_ai_CourtListener__get_endpoint_item(endpoint_id="opinions", item_id=<opinion_id>, fields=["id", "html_with_citations", "plain_text", "xml_harvard"])` (or, without the MCP, the REST `opinions/{id}/` endpoint). Write the response to a path like `/tmp/opinion-<id>.json`. Reuse an existing file if present — the script reads, never writes, this file.
+1. **Fetch the current hop's opinion JSON** (REST, direct to disk, per citation-toolkit Step 2b): `curl -s "https://www.courtlistener.com/api/rest/v4/opinions/<opinion_id>/" -o /tmp/opinion-<id>.json`. Reuse an existing file if present — the script reads, never writes, this file. The MCP text tools are the fallback only when shell network access is unavailable.
 
 2. **`chain_hop.py page`** (Haiku-tier / direct script call). Returns the full plain-text of the pincite page plus a sentence-level breakdown. No ranking.
 
@@ -172,7 +167,7 @@ If not terminal, fetch the predecessor opinion now (in preparation for the next 
 Every 8 opinions fetched across the whole run (counting the forest total when sibling-tracing is on, not the linear depth), pause and emit an interim summary:
 
 - Chain rendered as prose through the last completed hop
-- Opinions fetched so far; approximate remaining CourtListener budget for the hour (best-estimate based on 5,000/hr)
+- Opinions fetched so far; approximate remaining CourtListener budget (best-estimate: ~100/day unauthenticated, 5,000/hr with a token)
 - "Continue? — continue one more block of 8 / continue to natural termination / stop now"
 
 If the user stops, the last completed hop gets `terminal_reason: "user_stopped_at_checkpoint"` and the chain is written out through it. This is a pause, not a cap.

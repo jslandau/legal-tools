@@ -44,7 +44,7 @@ The skill extracts citations from scratch — do NOT rely on or reference any ex
 2. **Skip front matter.** Exclude cover pages, certificates of interest, tables of contents, any existing table of authorities, tables of abbreviations, and other preliminary material. These often use roman numeral pagination (i, ii, iii...).
 3. **Skip back matter.** Exclude certificates of compliance, certificates of service, and signature pages after the CONCLUSION.
 4. **Include footnotes.** Footnotes on substantive pages often contain important citations — sometimes entire string cites live in footnotes. Scan them thoroughly.
-5. **Exclude non-authority references.** References to other briefs in the case (e.g., "Blue Br.", "Red Br.", "Appellant's Br."), appendix citations ("Appx123"), and record citations ("R. at 45") are NOT legal authorities and should not appear in the TOA.
+5. **Exclude non-authority references.** References to other briefs in the case (e.g., "Blue Br.", "Red Br.", "Appellant's Br."), appendix citations ("Appx123"), and record citations ("R. at 45") are NOT legal authorities and should not appear in the TOA. **Patents are also not authorities** — in patent litigation, "U.S. Patent No. X" and `'NNN` short forms are evidence/subject matter, not cited law; exclude them and do not invent a Patents category.
 
 ## Citation Extraction Process
 

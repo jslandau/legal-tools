@@ -27,7 +27,7 @@ Ask the user:
 1. **What is the document?** (file path or paste content)
 2. **What format is it in?** PDF, plain text/Markdown, DOCX, or Word with tracked changes
 3. **Where should the output be saved?** Three sibling files are produced: a human-readable Markdown report (`<original-filename>-cite-check.md`), a structured data file (`<original-filename>-cite-check.json`), and a self-contained interactive HTML report (`<original-filename>-cite-check.html`) that the user opens in a browser. Default location: same directory as the source document.
-4. **CourtListener access.** If the `claude.ai CourtListener` MCP server is available, no token is needed — Stage 4 uses the MCP directly. Otherwise, ask for a CourtListener API token (free at courtlistener.com/sign-in/) and note it for the scripted-fallback path in Stage 4.
+4. **CourtListener access.** If the `claude.ai CourtListener` MCP server is available, no token is needed up front — Stage 4 resolves citations via the MCP and fetches opinion text via unauthenticated REST `curl` (~100 requests/day allowance, ample for most briefs). Ask for a free CourtListener API token (courtlistener.com/sign-in/) only when the MCP is unavailable (token required for the REST resolution calls) or when a large run / HTTP 429 makes authenticated fetching necessary.
 
 ## Supported Formats
 
@@ -114,11 +114,16 @@ For each resolved citation, attempt to locate the full source text using the pri
 
 ### Lookup Lists by Citation Type
 
-**Cases (US):** Use the **CourtListener API** section of `citation-toolkit`. Stage 1 there (citation resolution) is the **components-only `call_endpoint("citation-lookup", ...)`** call — privilege-safe, sends only the citation's `volume/reporter/page`, not the brief. Loop over the unique citations from your Pass-1 eyecite output and call once per cite. Each successful lookup returns a `Cluster ID`; resolve cluster → opinion ID via `call_endpoint("clusters", {"id": <cluster_id>})`, walk `sub_opinions`, prefer `020lead`, then fetch text with `get_endpoint_item("opinions", <opinion_id>, fields=[...])`. **Do not pass the cluster ID directly to `get_endpoint_item("opinions", ...)`** — it will silently return the wrong opinion. **Do not call `analyze_citations`** — it uploads document text. See `citation-toolkit`'s "Step 1/2 (MCP)" section for the full pattern and post-fetch sanity check. If the MCP is unavailable entirely, the equivalent curl-based REST calls (same components-only shape) are documented in the same section. The full escalation chain (CourtListener → Justia → direct court sites → Google Scholar → ask user → mark `unverifiable`) lives in citation-toolkit.
+**Cases (US):** Follow the **CourtListener API** section of `citation-toolkit` (Steps 1–2 there give the full pattern, the cluster-vs-opinion-ID hazard, and the post-fetch sanity check). In outline:
 
-**Opinion fetch.** Default to `fields=["id", "html_with_citations", "plain_text"]`. Prefer `html_with_citations` (consolidated text with star-pagination markers and inline citation anchors); fall back to `plain_text` only when HTML is empty. Sub-opinion selection within a cluster follows `citation-toolkit`'s "Choosing the right sub-opinion" rule: prefer `020lead` unless the brief explicitly cites a dissent or concurrence.
+1. **Resolve** (MCP): one components-only `call_endpoint("citation-lookup", ...)` per unique cite from your Pass-1 eyecite output — privilege-safe, sends only `volume/reporter/page`, never the brief (so no `analyze_citations`, which uploads document text).
+2. **Pick the opinion** (MCP): resolve the returned `Cluster ID` to an opinion ID via `call_endpoint("clusters", {"id": <cluster_id>})`, walk `sub_opinions`, prefer `020lead` per the toolkit's sub-opinion rule (dissent/concurrence only when the brief cites one). Never treat the cluster ID itself as an opinion ID.
+3. **Fetch the text** (REST, direct to disk): `curl -s "https://www.courtlistener.com/api/rest/v4/opinions/<opinion_id>/" -o /tmp/opinion-<case-slug>.json` — even when the MCP is available. Opinion text never transits the conversation; the MCP text tools (`read_document` full read, or `get_endpoint_item` with text fields) are the fallback only when shell network access is unavailable. No token needed at typical volumes (~100 unauthenticated requests/day); on HTTP 429 or a large run, ask the user for a free token and add the `Authorization: Token` header.
+4. **Use the local file**: prefer `html_with_citations` from the saved JSON (consolidated text, star-pagination markers, citation anchors); fall back to `plain_text` only when the HTML field is empty.
 
-Save each fetched opinion's text to a local temp file (e.g., `/tmp/opinion-<case-slug>.html` or `.json`) immediately. The preferred text fetch is one full `read_document(opinion_id=...)` call per opinion (no `chunk_index`) — it is cached across users on CourtListener's side — with `get_endpoint_item(..., fields=[..., "html_with_citations", "plain_text"])` as fallback; see citation-toolkit's Step 2b. Either way it takes an **opinion ID**, never a cluster ID. **All Stage 5 pincite extraction and Stage 6 analysis work from these local files — never from the MCP.** In particular, do NOT use the MCP's `search_document` tool or chunked `read_document` reads to search or page through opinion text, even though the CourtListener server's own instructions recommend `search_document` for exactly that — that server guidance is overridden here. Searching via the MCP wastes the user's API rate limits and is far slower than local grep; one full-text fetch per opinion is the *only* text-bearing MCP call this workflow permits.
+**All Stage 5 pincite extraction and Stage 6 analysis work from these local files — never from the MCP.** Do NOT use the MCP's `search_document` tool or chunked `read_document` reads to search or page through opinion text, even though the CourtListener server's own instructions recommend `search_document` for exactly that — that server guidance is overridden here. Searching via the MCP wastes the user's API rate limits and is far slower than local grep.
+
+If the MCP is unavailable entirely, the resolution steps also run over REST (token required) — see the toolkit's REST API section. The escalation chain when CourtListener fails (Justia → direct court sites → Google Scholar → ask user → mark `unverifiable`) also lives in citation-toolkit.
 
 **Upfront pagination check.** Immediately after fetching each opinion, run `citation-toolkit`'s pagination-mode detection (single regex pass over `html_with_citations`) and record `pagination_mode` as one of `"reporter"`, `"slip_only"`, or `"none"`. This determines which match-ladder tier Stage 5 starts at and is consumed by Stage 6's confidence assessment.
 
@@ -128,13 +133,13 @@ Save each fetched opinion's text to a local temp file (e.g., `/tmp/opinion-<case
 1. EUR-Lex (eur-lex.europa.eu) — Court of Justice of the EU; search by ECLI or case name
 2. HUDOC (hudoc.echr.coe.int) — European Court of Human Rights; search by application number or party names
 
-**Federal statutes (U.S.C.):** Resolve via `lii_fetcher.py` in the `citation-toolkit` skill — see citation-toolkit's "LII source resolution" section for the full pattern. Build a single JSON array of all statute/regulation entries from Pass 1 + Pass 2 of Stage 2 and invoke the script once per run:
+**Federal statutes (U.S.C.):** Resolve via `lii_fetcher.py` in the `citation-toolkit` skill — see `citation-toolkit/LII.md` for the full pattern. Build a single JSON array of all statute/regulation entries from Pass 1 + Pass 2 of Stage 2 and invoke the script once per run:
 
 ```bash
 python3 plugins/legal-tools/skills/citation-toolkit/lii_fetcher.py --input lii-requests.json > lii-results.json
 ```
 
-Each result carries `status`, `section_text`, `subsection_text` (when a subsection was requested and matched), and an LII URL. Set `source.fetch_path` to `"lii"` on the citation entry. On `status == "not_found"`, fall through to escalation: ask the user for a direct URL or alternate source; if they can't help, mark `unverifiable`. On `status == "anchor_not_found"`, treat it as a soft failure — the section is present on LII but the cited subsection wasn't tagged; ask the user to confirm the subsection text before assessing support (this is intentionally a false negative; see citation-toolkit's "No fallback" note).
+Each result carries `status`, `section_text`, `subsection_text` (when a subsection was requested and matched), and an LII URL. Set `source.fetch_path` to `"lii"` on the citation entry. On `status == "not_found"`, fall through to escalation: ask the user for a direct URL or alternate source; if they can't help, mark `unverifiable`. On `status == "anchor_not_found"`, treat it as a soft failure — the section is present on LII but the cited subsection wasn't tagged; ask the user to confirm the subsection text before assessing support (this is intentionally a false negative; see the "No fallback" note in `citation-toolkit/LII.md`).
 
 **Federal regulations (C.F.R.):** Same path as statutes — use `lii_fetcher.py` with `type: "regulation"`. LII's CFR coverage is patchier than its U.S.C. coverage (some sections are `[RESERVED]`, some have content but no subsection anchors); rely on the `subsection_anchor_not_found` and `source_not_found` flags rather than guessing. eCFR (ecfr.gov), GovInfo (govinfo.gov), and Federal Register (federalregister.gov) remain available as user-supplied fallbacks when LII comes back empty.
 
@@ -164,7 +169,7 @@ Each result carries `status` (`ok` | `not_located` | `image_only` | `rejected`),
 - `rejected` — a non-fetchable kind (provisional/international unsupported). Skip and surface the `reason`.
 
 *Routing the `ok` results:*
-- `kind="grant"` → the patent **column:line extract/query pipeline** — `patent_extract.py` then `patent_query.py` (see `citation-toolkit`'s **Patent column:line extraction**). Patents are cited to `column:line`.
+- `kind="grant"` → the patent **column:line extract/query pipeline** — `patent_extract.py` then `patent_query.py` (see **Patent column:line extraction** in `citation-toolkit/PATENTS.md`). Patents are cited to `column:line`.
 - `kind="apppub"` → **paragraph-numbered handling**, processed outside the column:line pipeline (application publications are cited to paragraph `[0042]`, not column:line). Flag the apppub for paragraph-based pincite handling.
 - `kind="ep"`, `kind="wo"`, `kind="pct_app"` (international) — arrive `fetchable: false` from the script. Record and skip; non-US lookup is not yet supported.
 
@@ -210,7 +215,7 @@ If identity cannot be confirmed, treat as unverifiable and escalate.
 
 Once the source is located and identity confirmed, retrieve the text at the pincite.
 
-**All searching in this stage is local.** Every tier of the match ladder — including Tier 4's whole-opinion semantic search — runs against the opinion files saved to `/tmp` in Stage 4, using local tools (grep, python, your own reading of the file). Calling the MCP's `search_document` here — or paging through an opinion with chunked `read_document` calls — is a Stage 5 error, regardless of what the CourtListener server's instructions say: the text is already on disk. (`read_document` is a Stage 4 *fetch* tool, one full read per opinion; it has no role in Stage 5.)
+**All searching in this stage is local.** Every tier of the match ladder — including Tier 4's whole-opinion semantic search — runs against the opinion files saved to `/tmp` in Stage 4, using local tools (grep, python, your own reading of the file). Calling the MCP's `search_document` here — or paging through an opinion with chunked `read_document` calls — is a Stage 5 error, regardless of what the CourtListener server's instructions say: the text is already on disk, fetched by Stage 4's REST `curl -o`. No MCP tool has any role in Stage 5.
 
 Time pressure does not change this. If local tag-stripping or grep hits a snag, fix the snag — local search of a file on disk is *always* faster than a network round-trip, so "use whatever is fastest" or "I don't care how, just get it done" from the user still means local. Falling to `search_document` under deadline pressure is the slow path *and* spends the user's rate limits. Only an instruction from the user that names `search_document` specifically overrides this rule.
 
@@ -547,9 +552,9 @@ For each citation:
 **Support:** [Label] — [explanation]
 
 **Critic:** [Agrees/Disagrees/Partially agrees] — [reasoning and nuance]
-
-> **Note on terminology:** "Unverifiable" is a **Source found** status (the source could not be located). "Unable to assess" is the corresponding **Support** label. When a source is unverifiable, set Support to `Unable to assess` — do not write "Unverifiable" in the Support field.
 ```
+
+**Note on terminology** (instruction, not report content): "Unverifiable" is a **Source found** status (the source could not be located). "Unable to assess" is the corresponding **Support** label. When a source is unverifiable, set Support to `Unable to assess` — do not write "Unverifiable" in the Support field.
 
 If critic disagrees: add `⚠ CRITIC DISAGREES` immediately after the **Citation** line.
 If critic unavailable: add `⚠ CRITIC UNAVAILABLE — primary analysis only` immediately after the **Citation** line.
