@@ -321,6 +321,22 @@ class TestProcessAndMain:
             assert results[2]["id"] == "p1"
             assert results[2]["status"] == "rejected"
 
+    def test_main_input_dash_reads_stdin(self, tmp_path, capsys):
+        """main(['--input', '-']) reads the batch from stdin."""
+        from patent_fetch import main
+        from unittest.mock import patch
+        from io import StringIO
+
+        entries = [
+            {"id": "p1", "kind": "provisional", "canonical_number": "123456"}
+        ]
+        with patch("sys.stdin", StringIO(json.dumps(entries))):
+            result = main(["--input", "-", "--cache-dir", str(tmp_path)])
+            assert result == 0
+
+        output = json.loads(capsys.readouterr().out)
+        assert output[0]["id"] == "p1"
+
     def test_main_help_exits_zero(self):
         """main(['--help']) exits with 0."""
         from patent_fetch import main

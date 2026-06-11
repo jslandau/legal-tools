@@ -875,12 +875,12 @@ def main(argv: list[str]) -> int:
         description="Verify patent quote location: emit normalized blobs or resolve a matched substring to column:line. Reads a JSON array of requests; writes a JSON array of results to stdout."
     )
     parser.add_argument(
-        "--input", help="Path to input JSON file. If omitted, read stdin."
+        "--input", help="Path to input JSON file ('-' for stdin). If omitted, read stdin."
     )
     args = parser.parse_args(argv)
 
     # Read input
-    if args.input:
+    if args.input and args.input != "-":
         with open(args.input, encoding="utf-8") as f:
             payload = f.read()
     else:

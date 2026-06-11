@@ -1267,6 +1267,32 @@ class TestMain:
         assert isinstance(output, list)
         assert output[0]["id"] == "test-1"
 
+    def test_main_reads_stdin_with_input_dash(self, capsys, monkeypatch, tmp_path, us9_artifact):
+        """main reads from stdin when --input is '-' (conventional dash)."""
+        from patent_extract import write_document
+
+        artifact_path = tmp_path / "test.json"
+        write_document(us9_artifact, artifact_path)
+
+        batch = json.dumps(
+            [
+                {
+                    "id": "test-1",
+                    "mode": "emit",
+                    "cite": "5:1",
+                    "artifact_path": str(artifact_path),
+                }
+            ]
+        )
+        monkeypatch.setattr("sys.stdin", io.StringIO(batch))
+
+        result = main(["--input", "-"])
+
+        assert result == 0
+        stdout, _ = capsys.readouterr()
+        output = json.loads(stdout)
+        assert output[0]["id"] == "test-1"
+
     def test_main_reads_from_file_with_input_arg(self, capsys, tmp_path, us9_artifact):
         """main reads from --input file when provided."""
         from patent_extract import write_document

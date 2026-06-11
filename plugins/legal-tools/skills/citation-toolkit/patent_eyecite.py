@@ -121,6 +121,16 @@ US_LONG_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Label-less grant cite: "U.S. 7,363,924" / "US 7363924 B2". No "Patent"
+# anchor, so the number shape carries the burden: exactly 7-8 digits
+# (comma-grouped or bare), case-sensitive "US", and no trailing digit —
+# 9+-digit figures (populations, ledger numbers) must not match. Overlap
+# with the full "U.S. Patent No." form is resolved by longest-match-wins.
+_BARE_NUM = r"(?:D|PP|RE)?(?:\d{1,2}(?:,\s?\d{3}){2}|\d{7,8})(?!\d)"
+US_BARE_RE = re.compile(
+    rf"\b(?:U\.?\s?S\.?|US)\s(?P<numbers>{_BARE_NUM}{_KIND_CODE})",
+)
+
 APPPUB_RE = re.compile(
     rf"(?:U\.?\s?S\.?\s+)?(?:Pat(?:ent)?\.?\s+)?(?:Application\s+|App\.\s+)?"
     rf"Pub(?:lication)?\.?\s+(?:Nos?\.?\s*)?(?:US\s?)?"
@@ -392,6 +402,7 @@ def _find_raw_matches(text: str) -> list[tuple[int, int, str, re.Match]]:
     """Sweep every family over the text. Returns (start, end, family, match)."""
     families = [
         ("us_long", US_LONG_RE),
+        ("us_long", US_BARE_RE),
         ("apppub", APPPUB_RE),
         ("apppub", APPPUB_BARE_RE),
         ("ep", EP_RE),
@@ -718,7 +729,7 @@ def main(argv: list[str]) -> int:
         description="Extract patent citations from document text. "
                     "Reads raw text; writes a JSON array of citations to stdout.",
     )
-    parser.add_argument("--input", help="Path to input text file. If omitted, read stdin.")
+    parser.add_argument("--input", help="Path to input text file ('-' for stdin). If omitted, read stdin.")
     parser.add_argument(
         "--resolve-metadata", action="store_true",
         help="Resolve inventor-name short forms via Google Patents metadata "
@@ -731,7 +742,7 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.input:
+    if args.input and args.input != "-":
         try:
             with open(args.input, "r", encoding="utf-8") as f:
                 text = f.read()

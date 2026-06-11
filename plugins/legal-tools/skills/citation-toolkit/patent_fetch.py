@@ -506,7 +506,7 @@ def main(argv: list[str]) -> int:
         "Reads a JSON array of patent requests; writes a JSON array of results to stdout.",
     )
     parser.add_argument(
-        "--input", help="Path to input JSON file. If omitted, read stdin."
+        "--input", help="Path to input JSON file ('-' for stdin). If omitted, read stdin."
     )
     parser.add_argument(
         "--cache-dir",
@@ -516,7 +516,7 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.input:
+    if args.input and args.input != "-":
         with open(args.input, "r", encoding="utf-8") as f:
             payload = f.read()
     else:

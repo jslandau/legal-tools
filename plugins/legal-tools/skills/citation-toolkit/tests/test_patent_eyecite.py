@@ -129,6 +129,77 @@ class TestUsLongForms:
         assert nums == ["8453642", "9154231", "8131198"]
 
 
+class TestUsBareForms:
+    """Label-less 'U.S. X,XXX,XXX' / 'US XXXXXXX' grant citations."""
+
+    def test_us_dotted_comma_grouped(self):
+        """'U.S. 7,363,924' (no 'Patent') is found, parsed, span-exact."""
+        text = 'The Stradella patent, U.S. 7,363,924, discloses a dispenser.'
+        cites = _cites(text)
+
+        bare = [c for c in cites if c["citation_type"] == "patent"]
+        assert len(bare) == 1
+        c = bare[0]
+        assert c["ref"]["kind"] == "grant"
+        assert c["ref"]["canonical_number"] == "7363924"
+        start, end = c["span"]
+        assert text[start:end] == "U.S. 7,363,924"
+
+    def test_us_undotted_bare_digits(self):
+        """'US 7363924' is found as a grant."""
+        cites = _cites("As shown in US 7363924, the valve closes.")
+
+        assert len(cites) == 1
+        assert cites[0]["ref"]["canonical_number"] == "7363924"
+
+    def test_kind_code_inside_span(self):
+        """'U.S. 7,363,924 B2' includes the kind code in the span."""
+        text = "See U.S. 7,363,924 B2 at col. 4."
+        cites = _cites(text)
+
+        assert len(cites) == 1
+        start, end = cites[0]["span"]
+        assert text[start:end] == "U.S. 7,363,924 B2"
+        assert cites[0]["ref"]["canonical_number"] == "7363924"
+
+    def test_eight_digit_number(self):
+        """Modern 8-digit grants ('US 11,234,567') are found."""
+        cites = _cites("US 11,234,567 was asserted.")
+
+        assert len(cites) == 1
+        assert cites[0]["ref"]["canonical_number"] == "11234567"
+
+    def test_full_long_form_not_double_matched(self):
+        """A full 'U.S. Patent No.' cite yields exactly one citation."""
+        cites = _cites("See U.S. Patent No. 8,453,642 at col. 4.")
+
+        assert len(cites) == 1
+
+    def test_usc_statute_not_matched(self):
+        """'42 U.S.C. § 1983' is not a patent citation."""
+        assert _cites("Under 42 U.S.C. § 1983, a claim lies.") == []
+
+    def test_large_comma_grouped_figure_not_matched(self):
+        """'U.S. 300,000,000' (9 digits) is not a patent number."""
+        assert _cites("The U.S. 300,000,000 population figure.") == []
+
+    def test_nine_digit_run_not_matched(self):
+        """'US 123456789' (9 digits) is not a 7-8 digit grant."""
+        assert _cites("Ref US 123456789 in the ledger.") == []
+
+    def test_lowercase_us_not_matched(self):
+        """'us 7,363,924' (lowercase) is not matched."""
+        assert _cites("give us 7,363,924 reasons") == []
+
+    def test_pincite_attaches_to_bare_form(self):
+        """A column:line pincite after a bare cite attaches normally."""
+        cites = _cites("U.S. 7,363,924 at 7:16-21.")
+
+        assert len(cites) == 1
+        pin = cites[0]["pincite"]
+        assert pin is not None and pin["kind"] == "column_line"
+
+
 class TestAppPubForms:
     """Application-publication span finding."""
 
@@ -299,6 +370,21 @@ class TestCli:
         out = json.loads(capsys.readouterr().out)
         assert isinstance(out, list)
         assert out[0]["citation_type"] == "patent"
+        assert out[0]["ref"]["canonical_number"] == "8453642"
+
+    def test_main_reads_stdin_with_input_dash(self, capsys, monkeypatch):
+        """--input - reads from stdin (conventional dash)."""
+        import io
+        import json
+        from patent_eyecite import main
+
+        monkeypatch.setattr(
+            "sys.stdin", io.StringIO("See U.S. Patent No. 8,453,642.")
+        )
+        result = main(["--input", "-"])
+
+        assert result == 0
+        out = json.loads(capsys.readouterr().out)
         assert out[0]["ref"]["canonical_number"] == "8453642"
 
     def test_main_reads_input_file(self, capsys, tmp_path):
