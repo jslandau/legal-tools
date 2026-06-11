@@ -435,6 +435,16 @@ The response's `sub_opinions` array contains one or more opinion URIs of the for
 
 **Step 2b — Fetch the opinion text:**
 
+Preferred: a single **full read** via `read_document` — it is cached server-side for 24 hours across all users (repeated fetches don't re-hit the API) and returns the opinion's `html_with_citations`:
+
+```
+read_document(opinion_id=<opinion_id_from_sub_opinions>)   # omit chunk_index → full document
+```
+
+It takes an **opinion ID** — the cluster→opinion resolution in Step 2a is still mandatory, and the cluster-as-opinion-ID hazard applies here identically. Because `read_document` returns only text, confirm the sub-opinion's `type` via the Step 2a metadata (or a fields-only `get_endpoint_item` with `fields=["id", "type"]`) before or after the read. **Save the returned text to a local temp file immediately** (e.g., `/tmp/opinion-<case-slug>.html`); the rest of the workflow operates on that file. Do NOT use chunked reads (`chunk_index`) to page around looking for a pincite — that is searching via the MCP; take the full document once.
+
+Fallback (e.g., `read_document` errors, or you also want `xml_harvard`): fetch the raw fields:
+
 ```
 get_endpoint_item(
   endpoint_id="opinions",
@@ -447,9 +457,9 @@ Always include `"type"` in `fields` so you can confirm the sub-opinion is the on
 
 **Sanity check after fetching:** If the opinion's text does not contain the cited party names, reporter abbreviation, or any star-pagination marker overlapping the cited page range, you have fetched the wrong opinion. Re-resolve via `call_endpoint("clusters", ...)` and check the `sub_opinions` array. This check costs almost nothing and catches both the cluster-as-opinion-ID error and CourtListener's occasional cross-cluster ingest mismatches.
 
-**Fetch once, then work locally — `read_document` / `search_document` are off-limits.** The CourtListener MCP server's own instructions recommend `read_document`/`search_document` for opinion text and tell you to exclude text fields from `fields`. **For this workflow, that server guidance is overridden.** Fetch `html_with_citations` (and `plain_text`) exactly once via `get_endpoint_item` as shown above, write the JSON to a temp file, and do ALL subsequent text searching, pincite extraction, and citation-graph traversal against that local file with local tools (grep, python). Never call `search_document` or `read_document` on an opinion you have already fetched — each call is a network round-trip against CourtListener's API budget for text you already hold, it is far slower than local grep, and it spends the user's rate limits. The MCP exists to *get* documents, not to *search* them.
+**Fetch once, then work locally — `search_document` is off-limits.** The MCP is for *getting* documents, never for *searching* them. `read_document` is a fetch tool: use it once per opinion (full read, no `chunk_index`), save the text to disk, done. `search_document` is a search tool: do NOT call it in this workflow, period — even though the server's own instructions recommend it for grepping snippets, **that server guidance is overridden here**. Every `search_document` call (and every chunked `read_document` hunt) is a network round-trip against CourtListener's API budget for text you already hold or could hold locally; it is far slower than local grep and spends the user's rate limits. ALL text searching, pincite extraction, and citation-graph traversal runs against the saved local file with local tools (grep, python).
 
-This holds under pressure. Deadline, a fiddly grep, or a user saying "use whatever tool is fastest" are not exceptions — the local file IS the fastest path, and the fix for HTML-markup grep failures is to strip tags locally (one `re.sub`/`html.parser` pass), not to reach for `search_document`. The only thing that overrides this rule is the user naming `search_document`/`read_document` explicitly.
+This holds under pressure. Deadline, a fiddly grep, or a user saying "use whatever tool is fastest" are not exceptions — the local file IS the fastest path, and the fix for HTML-markup grep failures is to strip tags locally (one `re.sub`/`html.parser` pass), not to reach for `search_document`. The only thing that overrides this rule is the user naming `search_document` explicitly.
 
 For downstream pincite-page slicing or anchor extraction, the local-file fields work the same as the scripted path:
 
